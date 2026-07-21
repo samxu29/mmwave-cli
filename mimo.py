@@ -24,10 +24,17 @@ signal-based glue) is now built in: GPIO edge detection is armed once at
 startup (same BCM pin/RISING-edge/200ms-debounce convention as ir_logger.py /
 receiver_ir.py), and timestamp collection is gated on/off directly around
 each capture's TDA framing window in run_one_capture() - no subprocess, no
-signals. Output: ir_timestamps/<capture_dir>_ir_timestamps.txt, one Unix
-epoch second (%.6f) per line. Silently disabled (with a printed notice) if
+signals. Output: ir_timestamps/<capture_dir>_ir_timestamps.npy, a float64
+array of Unix epoch seconds (same convention as receiver_ir.py's
+gpio_timestamps.npy). Silently disabled (with a printed notice) if
 RPi.GPIO isn't importable or the pin can't be armed (e.g. running off-Pi),
 or if --no-ir is passed.
+
+After a successful capture, the local IR timestamps .npy and the .mmwave.json
+config file are both SCP'd up into /mnt/ssd/<capture_dir>/ on the TDA board
+itself (alongside the raw .bin data), so pipeline.py's existing
+SCP-download-then-delete step picks them up together with the capture
+automatically - no separate correlation step needed downstream.
 """
 import time
 import argparse
@@ -35,9 +42,11 @@ from datetime import datetime
 import sys
 import mmwcas
 import signal
+import numpy as np
 from utility import export_config_to_json
 from utility import check_captured_files
 from utility import signal_handler
+from utility import upload_files_to_tda
 import os
 
 try:
@@ -122,16 +131,16 @@ def teardown_ir_sensor():
 
 def save_ir_timestamps(capture_dir):
     """Write out whatever IR timestamps were collected for this capture's
-    framing window and reset the buffer. Safe to call even if IR logging is
-    disabled (no-op)."""
+    framing window and reset the buffer. Saved as a float64 .npy array
+    (Unix epoch seconds), same convention as receiver_ir.py's
+    gpio_timestamps.npy. Safe to call even if IR logging is disabled
+    (no-op)."""
     global ir_timestamps
     if not ir_enabled:
         return None
     os.makedirs("ir_timestamps", exist_ok=True)
-    path = os.path.join("ir_timestamps", f"{capture_dir}_ir_timestamps.txt")
-    with open(path, "w") as f:
-        for ts in ir_timestamps:
-            f.write(f"{ts:.6f}\n")
+    path = os.path.join("ir_timestamps", f"{capture_dir}_ir_timestamps.npy")
+    np.save(path, np.array(ir_timestamps, dtype=np.float64))
     print(f"[IR] Saved {len(ir_timestamps)} marker(s) to {path}")
     ir_timestamps = []
     return path
@@ -175,7 +184,7 @@ def run_one_capture(exp_label, duration_s, tda_ip):
     print(f"\n Capturing... ({duration_s}s)")
     time.sleep(duration_s)
     ir_recording = False
-    save_ir_timestamps(capture_dir)
+    ir_npy_path = save_ir_timestamps(capture_dir)
 
     status = mmwcas.mmw_stop_frame()
     if status != 0:
@@ -203,6 +212,12 @@ def run_one_capture(exp_label, duration_s, tda_ip):
     json_filename = os.path.join("mmwave_json_files", f"{capture_dir}.mmwave.json")
     print(f"\nGenerating configuration file: {json_filename}")
     export_config_to_json(config_dict, json_filename)
+
+    # Push the IR timestamps + config sidecar up into the same TDA capture
+    # directory as the raw .bin data, so they travel together through the
+    # existing SCP-transfer-then-delete pipeline (pipeline.py) instead of
+    # needing separate correlation after the fact.
+    upload_files_to_tda([ir_npy_path, json_filename], capture_dir, tda_ip)
 
     return status, capture_dir
 

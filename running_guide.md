@@ -136,9 +136,14 @@ python mimo.py --ir-pin 4 --ir-bounce-ms 200
 > `run_experiment.sh` + `ir_logger.py`): GPIO rising-edge detection is armed
 > once at startup, then timestamp recording is switched on/off precisely
 > around each capture's TDA framing window (in `run_one_capture()`). Output
-> is saved to `ir_timestamps/<capture_dir>_ir_timestamps.txt` (one Unix
-> epoch `%.6f` per line). Automatically disabled (with a printed notice) if
+> is saved to `ir_timestamps/<capture_dir>_ir_timestamps.npy` (float64 array
+> of Unix epoch seconds). Automatically disabled (with a printed notice) if
 > `RPi.GPIO` isn't available (e.g. running off a Raspberry Pi).
+>
+> After a successful capture, this `.npy` file plus the capture's
+> `.mmwave.json` are both SCP'd up into `/mnt/ssd/<capture_dir>/` on the TDA
+> board itself, alongside the raw `.bin` data, so they travel together
+> through the normal SCP-download step later (e.g. `pipeline.py`).
 
 ---
 

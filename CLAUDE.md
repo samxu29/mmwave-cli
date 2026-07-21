@@ -63,9 +63,14 @@ python3 -c "import mmwcas; print('mmwcas OK')"
   rising-edge detection (BCM pin 4 default, 200ms debounce, same convention as
   `receiver_ir.py`) is armed once at startup, and recording is gated on/off
   around each capture's TDA framing window in `run_one_capture()`. Output:
-  `ir_timestamps/<capture_dir>_ir_timestamps.txt` (one Unix epoch `%.6f` per
-  line). Disable with `--no-ir`; override pin/debounce with `--ir-pin`/`--ir-bounce-ms`.
+  `ir_timestamps/<capture_dir>_ir_timestamps.npy` (float64 array of Unix epoch
+  seconds, same convention as `receiver_ir.py`'s `gpio_timestamps.npy`).
+  Disable with `--no-ir`; override pin/debounce with `--ir-pin`/`--ir-bounce-ms`.
   Silently disabled with a printed notice if `RPi.GPIO` isn't importable (e.g. off-Pi).
+- After a successful capture, `run_one_capture()` SCPs the local IR timestamps
+  `.npy` and `.mmwave.json` up into `/mnt/ssd/<capture_dir>/` on the TDA
+  (`utility.upload_files_to_tda()`), so they sit alongside the raw `.bin` data
+  and get picked up together by `pipeline.py`'s existing SCP-transfer step.
 
 ---
 
@@ -80,7 +85,7 @@ mmwave-cli/                         ← this repo (runs on Raspberry Pi ~/mmwave
 ├── makefile                        ← build C binary + Cython extension
 ├── pipeline.py                     ← automated 5-step pipeline (main entry point)
 ├── lora_sender.py                  ← LoRaWAN uplink via Wio-E5 AT commands (Step 5)
-├── utility.py                      ← check_captured_files(), export_config_to_json(), signal_handler()
+├── utility.py                      ← check_captured_files(), upload_files_to_tda(), export_config_to_json(), signal_handler()
 ├── mmwave_json_files/              ← generated .mmwave.json config files (per capture, moved into capture dir after SCP)
 ├── ir_timestamps/                  ← generated IR sensor timestamp files (per capture, see mimo.py IR logging)
 ├── dashboard/

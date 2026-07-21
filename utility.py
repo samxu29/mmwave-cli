@@ -99,7 +99,53 @@ def check_captured_files(capture_dir, tda_ip="192.168.33.180", retries=4, retry_
         print(f"\n ERROR: Failed to check files via SSH: {e}")
         return False, 0, []
 
+
+def upload_files_to_tda(local_paths, capture_dir, tda_ip="192.168.33.180"):
+    """
+    SCP local metadata files (IR timestamps .npy, .mmwave.json config) up
+    into /mnt/ssd/<capture_dir>/ on the TDA board, so they sit alongside the
+    raw .bin capture data and travel together through the existing
+    SCP-download-then-delete step in pipeline.py, instead of needing a
+    separate correlation step downstream.
+
+    local_paths: iterable of local file paths (None/missing entries are
+    skipped, e.g. when IR logging was disabled).
+
+    Returns True if the upload succeeded, False otherwise (never raises -
+    a failed upload here shouldn't fail the whole capture).
+    """
+    existing_paths = [p for p in local_paths if p and os.path.exists(p)]
+    if not existing_paths:
+        return False
+
+    remote_path = f"/mnt/ssd/{capture_dir}/"
+    scp_cmd = [
+        "scp", "-O",
+        "-oHostKeyAlgorithms=+ssh-rsa",
+        "-oPubkeyAcceptedAlgorithms=+ssh-rsa",
+        "-oStrictHostKeyChecking=no",
+        "-oConnectTimeout=10",
+        *existing_paths,
+        f"root@{tda_ip}:{remote_path}",
+    ]
+    try:
+        result = subprocess.run(scp_cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            print(f"\n WARNING: Failed to upload metadata files to TDA: {result.stderr.strip()}")
+            return False
+        print(f"\n Uploaded {len(existing_paths)} metadata file(s) to {tda_ip}:{remote_path}"
+              f" ({', '.join(os.path.basename(p) for p in existing_paths)})")
+        return True
+    except subprocess.TimeoutExpired:
+        print(f"\n WARNING: SCP upload to TDA timed out.")
+        return False
+    except Exception as e:
+        print(f"\n WARNING: Failed to upload metadata files to TDA: {e}")
+        return False
+
+
 import json
+import os
 import sys
 from datetime import datetime
 
