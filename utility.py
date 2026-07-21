@@ -1,24 +1,9 @@
 import subprocess
+import time
 
-def check_captured_files(capture_dir, tda_ip="192.168.33.180"):
-    """
-    Check if files were actually captured on the TDA board via SSH.
-    
-    Args:
-        capture_dir: The capture directory name
-        tda_ip: IP address of the TDA board (default: 192.168.33.180)
-    
-    Returns:
-        tuple: (success: bool, file_count: int, file_list: list)
-    """
-    remote_path = f"/mnt/ssd/{capture_dir}"
-    
-    print(f"\n{'='*60}")
-    print(f"Checking captured files on TDA board...")
-    print(f"{'='*60}")
-    print(f"Remote path: {remote_path}")
-    
-    # SSH command to list files in the capture directory
+
+def _ls_capture_dir(remote_path, tda_ip):
+    """Single SSH `ls` attempt against remote_path. Returns (success, file_count, files)."""
     ssh_cmd = [
         "ssh",
         "-oHostKeyAlgorithms=+ssh-rsa",
@@ -28,51 +13,84 @@ def check_captured_files(capture_dir, tda_ip="192.168.33.180"):
         f"root@{tda_ip}",
         f"ls -lh {remote_path} 2>/dev/null || echo 'DIRECTORY_NOT_FOUND'"
     ]
-    
+
+    result = subprocess.run(
+        ssh_cmd,
+        capture_output=True,
+        text=True,
+        timeout=15
+    )
+
+    if result.returncode != 0 or "DIRECTORY_NOT_FOUND" in result.stdout:
+        return False, 0, []
+
+    output_lines = result.stdout.strip().split('\n')
+
+    # Filter out directory entries (., ..) and get actual files
+    files = []
+    for line in output_lines:
+        if line and not line.startswith('total') and not line.endswith(' .') and not line.endswith(' ..'):
+            parts = line.split()
+            if len(parts) >= 9:
+                # Extract filename (last part) and size
+                filename = parts[-1]
+                size_str = parts[4]
+                files.append((filename, size_str))
+
+    return (len(files) > 0), len(files), files
+
+
+def check_captured_files(capture_dir, tda_ip="192.168.33.180", retries=4, retry_delay=2.0):
+    """
+    Check if files were actually captured on the TDA board via SSH.
+
+    mmw_dearming_tda() only confirms the TDA firmware accepted the stop
+    command - it does NOT wait for buffered frames to actually flush to
+    /mnt/ssd/. Immediately after a capture, the directory can transiently
+    exist-but-be-empty (or not exist yet) while the flush is still in
+    flight, especially for longer captures. So this retries with a short
+    delay before declaring failure, instead of a single immediate `ls`.
+
+    Args:
+        capture_dir: The capture directory name
+        tda_ip: IP address of the TDA board (default: 192.168.33.180)
+        retries: Number of SSH `ls` attempts before giving up (default: 4)
+        retry_delay: Seconds to wait between attempts (default: 2.0)
+
+    Returns:
+        tuple: (success: bool, file_count: int, file_list: list)
+    """
+    remote_path = f"/mnt/ssd/{capture_dir}"
+
+    print(f"\n{'='*60}")
+    print(f"Checking captured files on TDA board...")
+    print(f"{'='*60}")
+    print(f"Remote path: {remote_path}")
+
     try:
-        result = subprocess.run(
-            ssh_cmd,
-            capture_output=True,
-            text=True,
-            timeout=15
-        )
-        
-        if result.returncode != 0 or "DIRECTORY_NOT_FOUND" in result.stdout:
-            print(f"\n ERROR: Directory not found or empty!")
-            print(f"   Path: {remote_path}")
-            return False, 0, []
-        
-        output_lines = result.stdout.strip().split('\n')
-        
-        # Filter out directory entries (., ..) and get actual files
-        files = []
-        total_size = 0
-        
-        for line in output_lines:
-            if line and not line.startswith('total') and not line.endswith(' .') and not line.endswith(' ..'):
-                parts = line.split()
-                if len(parts) >= 9:
-                    # Extract filename (last part) and size
-                    filename = parts[-1]
-                    size_str = parts[4]
-                    files.append((filename, size_str))
-        
-        file_count = len(files)
-        
-        if file_count == 0:
-            print(f"\n WARNING: Directory exists but contains NO files!")
-            print(f"   This usually means data capture failed.")
-            return False, 0, []
-        
-        print(f"\n SUCCESS: Found {file_count} file(s) in capture directory")
-        print(f"\nCaptured files:")
-        print(f"{'-'*60}")
-        for filename, size in files:
-            print(f"  {filename:50s} {size:>8s}")
-        print(f"{'-'*60}")
-        
-        return True, file_count, files
-        
+        for attempt in range(1, retries + 1):
+            success, file_count, files = _ls_capture_dir(remote_path, tda_ip)
+
+            if success:
+                print(f"\n SUCCESS: Found {file_count} file(s) in capture directory"
+                      + (f" (attempt {attempt}/{retries})" if attempt > 1 else ""))
+                print(f"\nCaptured files:")
+                print(f"{'-'*60}")
+                for filename, size in files:
+                    print(f"  {filename:50s} {size:>8s}")
+                print(f"{'-'*60}")
+                return True, file_count, files
+
+            if attempt < retries:
+                print(f"\n No files yet (attempt {attempt}/{retries}) - TDA may still be "
+                      f"flushing to disk, retrying in {retry_delay}s...")
+                time.sleep(retry_delay)
+
+        print(f"\n WARNING: Directory not found or empty after {retries} attempts!")
+        print(f"   Path: {remote_path}")
+        print(f"   This usually means data capture failed.")
+        return False, 0, []
+
     except subprocess.TimeoutExpired:
         print(f"\n ERROR: SSH connection timeout!")
         print(f"   Could not connect to TDA board at {tda_ip}")

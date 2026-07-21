@@ -604,20 +604,34 @@ int run_capture(unsigned char *capture_dir_name, float duration_ms, uint8_t is_r
   msleep(2000);
 
   /**
-   * Start framing (slaves first, master last - see the hardware-sync note
-   * in Cascade_Configuration_Capture_Test10s.lua). On repeated back-to-back
-   * captures within the same live connection (--interactive), a device
-   * occasionally misses its Frame-Start ACK window (RL_RET_CODE_RESP_TIMEOUT,
-   * -8) because the RF chips haven't fully settled from the previous
-   * de-arm yet - this never showed up in the original one-shot flow because
-   * a fresh process + full MMWL_TDAInit()/configure() naturally gave the
-   * hardware 30-60s to settle. Retry once after a longer cool-down before
-   * giving up, instead of failing the whole capture on a timing fluke.
+   * Start framing: slaves first (arms their wait-for-hardware-sync state),
+   * THEN master last, with a settle delay in between - see the hardware-sync
+   * note in Cascade_Configuration_Capture_Test10s.lua. The master's software
+   * trigger is what actually fires the RF sweep + sync pulse the slaves are
+   * waiting for; without the settle delay the master can fire before the
+   * slaves finish arming, and EVERY RPC call still reports STATUS 0 (arm,
+   * start, stop, de-arm all "succeed") while /mnt/ssd/<capture_dir> ends up
+   * with 0-byte .bin files - this bit us for real, see git history. A
+   * previous version of this function looped over all 4 devices back-to-back
+   * with no delay (the comment here claimed "slaves first, master last" but
+   * the code never actually separated the two groups with a pause) - fixed
+   * to match the working LUA sequence below.
+   *
+   * On repeated back-to-back captures within the same live connection
+   * (--interactive), a device occasionally misses its Frame-Start ACK window
+   * (RL_RET_CODE_RESP_TIMEOUT, -8) because the RF chips haven't fully settled
+   * from the previous de-arm yet - this never showed up in the original
+   * one-shot flow because a fresh process + full MMWL_TDAInit()/configure()
+   * naturally gave the hardware 30-60s to settle. Retry once after a longer
+   * cool-down before giving up, instead of failing the whole capture on a
+   * timing fluke.
    */
   int start_status = 0;
-  for (int i = 3; i >= 0; i--) {
-    start_status += MMWL_StartFrame(1U << i);
+  for (int i = 3; i >= 1; i--) {
+    start_status += MMWL_StartFrame(1U << i);   // slaves: arm hw-sync wait state
   }
+  msleep(100);                                   // let slaves finish arming
+  start_status += MMWL_StartFrame(1U);           // master: fires RF sweep + sync pulse
   if (start_status != 0) {
     DEBUG_PRINT("WARNING: Framing failed to start cleanly (status %d) - "
                 "stopping, cooling down, and retrying once\n\n", start_status);
@@ -626,9 +640,11 @@ int run_capture(unsigned char *capture_dir_name, float duration_ms, uint8_t is_r
     }
     msleep(3000);
     start_status = 0;
-    for (int i = 3; i >= 0; i--) {
+    for (int i = 3; i >= 1; i--) {
       start_status += MMWL_StartFrame(1U << i);
     }
+    msleep(100);
+    start_status += MMWL_StartFrame(1U);
   }
   status += start_status;
   check(status,

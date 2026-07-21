@@ -3,6 +3,7 @@ from libc.stdio cimport printf
 from libc.stdint cimport uint8_t, int8_t,int16_t,uint16_t, int32_t, uint32_t
 from libc.math cimport ceil
 from libc.string cimport strncpy
+import time
 
 cdef extern from "ti/mmwave/mmwave.h":
     '''
@@ -831,12 +832,30 @@ cpdef int mmw_arming_tda(str capture_path):
     return status
 
 cpdef int mmw_start_frame():
+    """
+    Start framing: slaves first (arms their wait-for-hardware-sync state),
+    THEN master last, with a settle delay in between - see the hardware-sync
+    note in Cascade_Configuration_Capture_Test10s.lua. The master's software
+    trigger is what actually fires the RF sweep + sync pulse the slaves are
+    waiting for; without the settle delay the master can fire before the
+    slaves finish arming, and EVERY RPC call still reports status 0 (arm,
+    start, stop, de-arm all "succeed") while /mnt/ssd/<capture_dir> ends up
+    with 0-byte .bin files. A previous version of this function looped over
+    all 4 devices back-to-back with no delay between slaves and master,
+    which silently produced empty captures - fixed to match the working
+    LUA sequence.
+    """
     cdef int status = 0
     cdef int i
-    # Start devices sequentially (3, 2, 1, 0)
-    for i in range(3, -1, -1):
+    # Slaves first (bits 8, 4, 2 = slave3, slave2, slave1): arm hw-sync wait state
+    for i in range(3, 0, -1):
         status += MMWL_StartFrame(1 << i)
-    
+
+    time.sleep(0.1)  # let slaves finish arming before master fires the sync pulse
+
+    # Master last (bit 1): fires RF sweep + sync pulse
+    status += MMWL_StartFrame(1)
+
     check(status,
         b"[MMWCAS-RF] Framing ...",
         b"[MMWCAS-RF] Failed to initiate framing!", 
