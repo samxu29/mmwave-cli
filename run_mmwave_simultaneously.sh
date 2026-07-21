@@ -1,39 +1,39 @@
 #!/bin/bash
 
-# --- Konfigurasi Variabel ---
+# --- Variable configuration ---
 
-# Ganti 'nama_perangkat_anda' dengan nilai yang sesuai untuk variabel $NAME
-# Anda juga bisa mengubah ini menjadi meminta input dari pengguna.
+# Replace 'your_device_name' with the appropriate value for $NAME.
+# You can also change this to prompt the user for input instead.
 NAME="SimultantRecordTest_$(date +%y%m%d_%H%M%S)"
 
-# File konfigurasi yang sama
+# Shared config file
 CONFIG_FILE="config/Cascade_Configuration_250227_79Ghz_30frame.toml"
 
-# Durasi rekaman yang sama
+# Shared recording duration
 TIME_DURATION="0.17"
 
-echo "Memulai eksekusi mmwave secara simultan dengan NAME=$NAME"
+echo "Starting simultaneous mmwave execution with NAME=$NAME"
 echo "--------------------------------------------------------"
 
-# --- Perintah 1 (Jalankan di Background) ---
-echo "Memulai Perintah 1 (IP 192.168.33.180)..."
+# --- Command 1 (run in background) ---
+echo "Starting command 1 (IP 192.168.33.180)..."
 ./mmwave -d "$NAME" -i 192.168.33.180 -f "$CONFIG_FILE" --configure --record --time "$TIME_DURATION" &
 
-# Simpan PID dari proses pertama
+# Save PID of the first process
 PID1=$!
 
-# --- Perintah 2 (Jalankan di Background) ---
-echo "Memulai Perintah 2 (IP 192.168.33.181)..."
+# --- Command 2 (run in background) ---
+echo "Starting command 2 (IP 192.168.33.181)..."
 ./mmwave -d "$NAME" -i 192.168.33.181 -f "$CONFIG_FILE" --configure --record --time "$TIME_DURATION" &
 
-# Simpan PID dari proses kedua
+# Save PID of the second process
 PID2=$!
 
-# --- Tunggu Kedua Perintah Selesai ---
+# --- Wait for both commands to finish ---
 echo ""
-echo "⏳ Menunggu kedua proses mmwave (PID $PID1 dan $PID2) selesai..."
+echo "Waiting for both mmwave processes (PID $PID1 and $PID2) to finish..."
 wait $PID1
 wait $PID2
 
 echo ""
-echo "Kedua perintah mmwave telah selesai dieksekusi."
+echo "Both mmwave commands have finished executing."

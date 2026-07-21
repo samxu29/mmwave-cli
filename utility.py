@@ -85,11 +85,26 @@ import json
 import sys
 from datetime import datetime
 
+# PATCHED: idle time is fixed per-profile (not part of config_dict) to match
+# mimo.c/mmwcas.pyx's 3-profile geometry exactly - profile0=175us,
+# profile1/2=7us. Same value everywhere else (startFreq/slope/adcStart/
+# rampEnd/numAdcSamples/digOutSampleRate/rxGain) across all 3 profiles.
+IDLE_TIMES_US = [175, 7, 7]
+
+# PATCHED: only Dev4 (devId 3) transmits, one TX antenna per chirp
+# (TX0/TX1/TX2 on chirp0/1/2 respectively) - matches mimo.c's chripTxTable.
+# Dev1/Dev2/Dev3 are RX-only on every chirp.
+TX_DEVICE_ID = 3
+
+
 def export_config_to_json(config_dict, filename, num_devices=4):
     """
     Create mmwave.json file from radar configuration dictionary.
     This version matches the exact structure from mmWave Studio.
-    
+
+    PATCHED to reflect mimo.c's geometry: 3 chirps (not 12), single TX
+    device, 3 profiles with idle time 175us/7us/7us (not 1 profile).
+
     Args:
         config_dict: Dictionary containing MIMO configuration with profile, frame, and channel settings
         filename: Output JSON filename
@@ -103,9 +118,9 @@ def export_config_to_json(config_dict, filename, num_devices=4):
     channel = config_dict["mimo"]["channel"]
     
     # Profile values - map from config_dict keys to expected values
+    # (shared across all 3 profiles; idle time comes from IDLE_TIMES_US instead)
     startFreq_GHz = profile["startFrequency"]
     freqSlope_MHz_usec = profile["frequencySlope"]
-    idleTime_usec = profile["idleTime"]
     adcStartTime_usec = profile["adcStartTime"]
     rampEndTime_usec = profile["rampEndTime"]
     txStartTime_usec = profile.get("txStartTime", 0)
@@ -114,7 +129,6 @@ def export_config_to_json(config_dict, filename, num_devices=4):
     hpfCornerFreq1 = profile["hpfCornerFreq1"]
     hpfCornerFreq2 = profile["hpfCornerFreq2"]
     rxGain = profile["rxGain"]
-    profileId = profile["id"]
     
     # Frame values
     numLoops = frame["numLoops"]
@@ -216,25 +230,16 @@ def export_config_to_json(config_dict, filename, num_devices=4):
     }
 
     for devId in range(num_devices):
-        # Table defining which TX is active for each chirp per device
-        # Device 0: chirps 11, 10, 9
-        # Device 1: chirps 8, 7, 6
-        # Device 2: chirps 5, 4, 3
-        # Device 3: chirps 2, 1, 0
-        chirp_tx_table = {0: {11, 10, 9}, 1: {8, 7, 6}, 2: {5, 4, 3}, 3: {2, 1, 0}}
+        # PATCHED: only TX_DEVICE_ID (Dev4) transmits - TX0 on chirp0, TX1 on
+        # chirp1, TX2 on chirp2. All other devices are RX-only on every chirp.
         chirps = []
-        for chirpIdx in range(12):
-            tx_enable = 0
-            # Check if this chirp should be active for current device
-            if chirpIdx in chirp_tx_table.get(devId, set()):
-                # Sort TX enable bits in order (MSB first)
-                tx_map = {val: idx for idx, val in enumerate(sorted(list(chirp_tx_table[devId]), reverse=True))}
-                tx_enable = 1 << tx_map[chirpIdx]
+        for chirpIdx in range(3):
+            tx_enable = (1 << chirpIdx) if devId == TX_DEVICE_ID else 0
             chirps.append({
                 "rlChirpCfg_t": {
                     "chirpStartIdx": chirpIdx,
                     "chirpEndIdx": chirpIdx,
-                    "profileId": profileId,
+                    "profileId": chirpIdx,  # PATCHED: profile selected per chirp (0/1/2)
                     "startFreqVar_MHz": 0.0,
                     "freqSlopeVar_KHz_usec": 0.0,
                     "idleTimeVar_usec": 0.0,
@@ -265,13 +270,15 @@ def export_config_to_json(config_dict, filename, num_devices=4):
                 "rlLowPowerModeCfg_t": {
                     "lpAdcMode": lpAdcMode
                 },
+                # PATCHED: 3 profiles instead of 1 - idle time differs per
+                # profile (175us/7us/7us), all other fields shared.
                 "rlProfiles": [{
                     "rlProfileCfg_t": {
-                        "profileId": profileId,
+                        "profileId": pIdx,
                         "pfVcoSelect": "0x0",
                         "pfCalLutUpdate": "0x0",
                         "startFreqConst_GHz": startFreq_GHz,
-                        "idleTimeConst_usec": idleTime_usec,
+                        "idleTimeConst_usec": IDLE_TIMES_US[pIdx],
                         "adcStartTimeConst_usec": adcStartTime_usec,
                         "rampEndTime_usec": rampEndTime_usec,
                         "txOutPowerBackoffCode": "0x0",
@@ -284,13 +291,13 @@ def export_config_to_json(config_dict, filename, num_devices=4):
                         "hpfCornerFreq2": hpfCornerFreq2,
                         "rxGain_dB": f"0x{rxGain:X}"
                     }
-                }],
+                } for pIdx in range(3)],
                 "rlChirps": chirps,
                 "rlRfInitCalConf_t": {
                     "calibEnMask": "0x1FF0"
                 },
                 "rlFrameCfg_t": {
-                    "chirpEndIdx": 11,
+                    "chirpEndIdx": 2,   # PATCHED: was 11 (12-chirp scheme), now 3 chirps
                     "chirpStartIdx": 0,
                     "numLoops": numLoops,
                     "numFrames": numFrames,

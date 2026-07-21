@@ -1,18 +1,18 @@
-# Petunjuk Menjalankan MIMO Radar Capture
+# MIMO Radar Capture — Running Guide
 
-## Daftar Isi
+## Table of Contents
 - [Running mimo.c](#running-mimoc)
 - [Running mimo.py](#running-mimopy)
-- [Struktur Direktori](#struktur-direktori)
-- [Catatan Penting](#catatan-penting)
+- [Directory Structure](#directory-structure)
+- [Important Notes](#important-notes)
 
 ---
 
 ## Running `mimo.c`
 
-### 1. Persiapan Dependensi
+### 1. Dependency Setup
 ```bash
-# Install build tools jika belum ada
+# Install build tools if not already installed
 sudo apt install build-essential
 ```
 
@@ -27,48 +27,48 @@ gcc -o mimo mimo.c \
     -lm \
     -Wall
 ```
-> Sesuaikan path `-I` dan `-L` dengan lokasi header dan library TI mmWaveLink di sistem Anda.
+> Adjust the `-I` and `-L` paths to match the location of the TI mmWaveLink headers/library on your system.
 
-### 3. Jalankan
+### 3. Run
 ```bash
-# Konfigurasi saja
+# Configure only
 ./mimo -c -i 192.168.33.180 -p 5001
 
-# Rekam saja (oneshot, 2 menit)
+# Record only (oneshot, 2 minutes)
 ./mimo -r -t 2.0 -d mmwl_capture -i 192.168.33.180 -p 5001
 
-# Konfigurasi sekaligus rekam
+# Configure and record
 ./mimo -c -r -t 2.0 -d mmwl_capture -i 192.168.33.180 -p 5001
 
-# Mode monitor (infinite loop, interval 10 detik)
+# Monitor mode (infinite loop, 10 second interval)
 ./mimo -c -r -m -n 10 -i 192.168.33.180 -p 5001
 ```
 
-### Daftar Argumen `mimo.c`
+### `mimo.c` Argument List
 
-| Argumen | Keterangan | Default |
+| Argument | Description | Default |
 |---|---|---|
-| `-c` / `--configure` | Konfigurasi radar | - |
-| `-r` / `--record` | Mulai rekam | - |
-| `-t` / `--time` | Durasi rekam (menit) | `1.0` |
-| `-d` / `--capture-dir` | Nama direktori capture | `MMWL_Capture_<timestamp>` |
-| `-i` / `--ip-addr` | IP TDA board | `192.168.33.180` |
-| `-p` / `--port` | Port TDA board | `5001` |
-| `-m` / `--monitor` | Mode monitor (infinite loop) | - |
-| `-n` / `--interval` | Interval antar capture (detik) | `10` |
+| `-c` / `--configure` | Configure the radar | - |
+| `-r` / `--record` | Start recording | - |
+| `-t` / `--time` | Recording duration (minutes) | `1.0` |
+| `-d` / `--capture-dir` | Capture directory name | `MMWL_Capture_<timestamp>` |
+| `-i` / `--ip-addr` | TDA board IP | `192.168.33.180` |
+| `-p` / `--port` | TDA board port | `5001` |
+| `-m` / `--monitor` | Monitor mode (infinite loop) | - |
+| `-n` / `--interval` | Interval between captures (seconds) | `10` |
 
 ---
 
 ## Running `mimo.py`
 
-### 1. Persiapan Dependensi
+### 1. Dependency Setup
 ```bash
 pip install cython
 ```
 
 ### 2. Build `mmwcas.pyx` (Cython)
 
-Buat file `setup.py` terlebih dahulu:
+First create the `setup.py` file:
 ```python
 # setup.py
 from setuptools import setup
@@ -79,43 +79,70 @@ setup(
 )
 ```
 
-Kemudian build:
+Then build:
 ```bash
 python setup.py build_ext --inplace
 ```
-> Setelah berhasil, akan muncul file `mmwcas.so` (Linux) di direktori yang sama.
+> On success, an `mmwcas.so` file (Linux) will appear in the same directory.
 
-### 3. Jalankan
+### 3. Run
 ```bash
-# Rekam 10 detik, 1 kali (default)
+# Record 10 seconds, 1 time (default)
 python mimo.py
 
-# Rekam 30 detik dengan direktori custom
+# Record 30 seconds with a custom directory
 python mimo.py -d my_capture -t 30.0
 
-# Rekam 3 kali loop, interval 60 detik antar loop
+# Record 3 loops, 60 second interval between loops
 python mimo.py -d my_capture -t 10.0 -n 3 -i 60.0
 
-# Infinite loop (Ctrl+C untuk berhenti)
+# Infinite loop (Ctrl+C to stop)
 python mimo.py -d my_capture -t 10.0 -n 0
 
-# Ganti IP TDA board
+# Change the TDA board IP
 python mimo.py --tda-ip 192.168.33.180
+
+# Interactive mode: configure once, then repeatedly type an experiment name
+# at the prompt (mirrors `mimo.c --interactive`) - no reconfiguration
+python mimo.py --interactive
+
+# Disable IR sensor timestamp logging (e.g. testing without GPIO/sensor)
+python mimo.py --no-ir
+
+# Change the IR sensor's GPIO pin (BCM) and debounce
+python mimo.py --ir-pin 4 --ir-bounce-ms 200
 ```
 
-### Daftar Argumen `mimo.py`
+> **Radar geometry note**: `mimo.py` is PATCHED to be identical to `mimo.c`
+> (3 chirps, 1 TX device, 3 profiles with idle time 175us/7us/7us, 60MHz/us
+> slope, 65us rampEnd, 255 loops/frame, 100ms/10Hz frame periodicity). See
+> the header comment in `mimo.py` for details.
 
-| Argumen | Keterangan | Default |
+### `mimo.py` Argument List
+
+| Argument | Description | Default |
 |---|---|---|
-| `-d` / `--directory` | Nama direktori capture | `mmwave_python` |
-| `-t` / `--duration` | Durasi rekam (detik) | `10.0` |
-| `--tda-ip` | IP TDA board | `192.168.33.180` |
-| `-n` / `--num-loops` | Jumlah loop (0 = infinite) | `1` |
-| `-i` / `--inter-loop-time` | Jeda antar loop (detik) | `60.0` |
+| `-d` / `--directory` | Capture directory name | `mmwave_python` |
+| `-t` / `--duration` | Recording duration (seconds) | `10.0` |
+| `--tda-ip` | TDA board IP | `192.168.33.180` |
+| `-n` / `--num-loops` | Number of loops (0 = infinite) | `1` |
+| `-i` / `--inter-loop-time` | Delay between loops (seconds) | `60.0` |
+| `-I` / `--interactive` | Configure once, then loop on experiment names typed at the prompt | - |
+| `--no-ir` | Disable IR sensor timestamp logging | - |
+| `--ir-pin` | IR sensor GPIO pin (BCM) | `4` |
+| `--ir-bounce-ms` | IR sensor software debounce (ms) | `200` |
+
+> **IR sensor timestamp logging** (built-in, replaces the now-removed
+> `run_experiment.sh` + `ir_logger.py`): GPIO rising-edge detection is armed
+> once at startup, then timestamp recording is switched on/off precisely
+> around each capture's TDA framing window (in `run_one_capture()`). Output
+> is saved to `ir_timestamps/<capture_dir>_ir_timestamps.txt` (one Unix
+> epoch `%.6f` per line). Automatically disabled (with a printed notice) if
+> `RPi.GPIO` isn't available (e.g. running off a Raspberry Pi).
 
 ---
 
-## Struktur Direktori
+## Directory Structure
 
 ```
 project/
@@ -124,16 +151,17 @@ project/
 ├── mmwcas.pyx
 ├── setup.py
 ├── utility.py
-├── include/            ← header TI (mmwave.h, dll)
-├── lib/                ← library TI (.so / .a)
-└── mmwave_json_files/  ← output JSON (dibuat otomatis)
+├── include/            ← TI headers (mmwave.h, etc.)
+├── lib/                ← TI libraries (.so / .a)
+├── mmwave_json_files/  ← generated JSON output (created automatically)
+└── ir_timestamps/      ← generated IR sensor timestamp output per capture (created automatically)
 ```
 
 ---
 
-## Catatan Penting
+## Important Notes
 
-- Pastikan TDA board sudah **menyala dan terhubung ke jaringan** sebelum menjalankan script.
-- Pastikan koneksi SSH ke `root@192.168.33.180` dapat dilakukan **tanpa password** (menggunakan SSH key), karena `utility.py` menggunakan SSH untuk verifikasi file hasil capture.
-- File hasil capture tersimpan di `/mnt/ssd/<capture_dir>` di dalam TDA board.
-- File `.mmwave.json` tersimpan di direktori `mmwave_json_files/` di host (sesuai perubahan yang telah dilakukan).
+- Make sure the TDA board is **powered on and connected to the network** before running the script.
+- Make sure SSH access to `root@192.168.33.180` works **without a password** (using an SSH key), since `utility.py` uses SSH to verify captured files.
+- Captured files are stored at `/mnt/ssd/<capture_dir>` on the TDA board.
+- The `.mmwave.json` file is stored in the `mmwave_json_files/` directory on the host.

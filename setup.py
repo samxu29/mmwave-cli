@@ -1,10 +1,10 @@
 from setuptools import setup, Extension
 from Cython.Build import cythonize
 
-# 定义项目的根目录
+# Project root directory
 ROOT_DIR = "ti"
 
-# 定义包含头文件和源文件的目录
+# Directories containing headers and source files
 MMWLINK_IDIR = f"{ROOT_DIR}/mmwavelink/src"
 MMWLINK_H_IDIR = f"{ROOT_DIR}/mmwavelink/include"
 MMWETH_IDIR = f"{ROOT_DIR}/ethernet/src"
@@ -12,9 +12,9 @@ MMWAVE_IDIR = f"{ROOT_DIR}/mmwave"
 #CLI_OPT_IDIR = "opt"
 #TOML_CONFIG_IDIR = "toml"
 
-# 定义需要编译的所有 `.c` 文件路径
+# All `.c` source files to compile
 sources = [
-    "mmwcas.pyx",         # 包含 Cython 主文件
+    "mmwcas.pyx",         # Main Cython file
     f"{MMWLINK_IDIR}/rl_controller.c",
     f"{MMWLINK_IDIR}/rl_device.c",
     f"{MMWLINK_IDIR}/rl_driver.c",
@@ -29,24 +29,24 @@ sources = [
 #    f"{TOML_CONFIG_IDIR}/*.c"
 ]
 
-# 创建扩展模块
+# Build the extension module
 extensions = Extension(
-        name = "mmwcas",          # 输出模块的名称
-        sources=sources,        # 所有源文件
+        name = "mmwcas",          # Output module name
+        sources=sources,        # All source files
         include_dirs=[
-#            ".",                # 当前目录
-            MMWLINK_IDIR,       # mmwlink 目录
-            MMWLINK_H_IDIR,     # mmwlink 头文件目录
-            MMWETH_IDIR,        # mmwethernet 目录
-            MMWAVE_IDIR,        # mmwave 目录
-#            CLI_OPT_IDIR,       # cliopt 目录
-#            TOML_CONFIG_IDIR    # tomlconfig 目录
+#            ".",                # Current directory
+            MMWLINK_IDIR,       # mmwlink directory
+            MMWLINK_H_IDIR,     # mmwlink header directory
+            MMWETH_IDIR,        # mmwethernet directory
+            MMWAVE_IDIR,        # mmwave directory
+#            CLI_OPT_IDIR,       # cliopt directory
+#            TOML_CONFIG_IDIR    # tomlconfig directory
         ],
-        extra_compile_args=["-w", "-Wno-error=incompatible-pointer-types", "-Wno-error=int-conversion"],  # 添加编译选项（如禁用警告）
-        libraries=["pthread", "m"]  # 链接 pthread 和数学库
+        extra_compile_args=["-w", "-Wno-error=incompatible-pointer-types", "-Wno-error=int-conversion"],  # extra compile flags (e.g. disable warnings)
+        libraries=["pthread", "m"]  # link pthread and math libraries
     )
 
-# 编写 setup 配置
+# Setup configuration
 setup(
     name="mmwcas",
     ext_modules=cythonize(extensions),

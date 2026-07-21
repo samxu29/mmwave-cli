@@ -14,6 +14,7 @@ mmwave
 /build
 .DS_Store
 *.mmwave.json
+/ir_timestamps/*
 __pycache__/
 /PostProc/*
 dashboard/telegraf/.env

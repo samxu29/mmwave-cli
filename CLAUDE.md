@@ -46,12 +46,26 @@ python3 -c "import mmwcas; print('mmwcas OK')"
 | LoRaWAN modem | Wio-E5 Development Kit (SeeedStudio) — `/dev/ttyUSB0`, 9600 baud, CP2102N |
 | LoRaWAN network | The Things Stack (TTN) — tenant `imrsl`, app `iosar-imrsl`, device `gb-sar-01` |
 
-**Key radar parameters (`mimo.py` `config_dict`):**
-- `framePeriodicity = 50 ms` → frame rate = 20 Hz
+**Key radar parameters (`mimo.py` `config_dict`) — PATCHED to match `mimo.c` exactly:**
+- `framePeriodicity = 100 ms` → frame rate = 10 Hz (was 50ms/20Hz — halves the max
+  detectable structural vibration frequency to ~5 Hz by Nyquist; revisit
+  `FREQ_MAX` in `~/IoSAR-EdgeProcessing/ps_monitoring.py` if this matters)
 - `numAdcSamples = 256`, `adcSamplingFrequency = 8000 ksps`
-- `frequencySlope = 79.0327 MHz/μs`, `rampEndTime = 40 μs`
-- `numLoops = 16` chirp loops per frame
+- `frequencySlope = 60 MHz/μs`, `rampEndTime = 65 μs`
+- `numLoops = 255` chirp loops per frame (was 16)
+- 3 chirps only (not 12), single TX device (TX0/TX1/TX2 on chirp0/1/2), 3 profiles
+  with idle time 175μs/7μs/7μs (fixed, not configurable via `config_dict`)
+- `mimo.py` also supports `-I`/`--interactive`: configure once, then loop on typed
+  experiment names (mirrors `mimo.c`'s `--interactive`)
 - `dt` in edge processing is read automatically from `.mmwave.json` per capture (falls back to `DT_DEFAULT = 0.05`)
+- IR sensor timestamp logging is built directly into `mimo.py` (replaces the old
+  `run_experiment.sh` + `ir_logger.py` signal-based glue, both removed): GPIO
+  rising-edge detection (BCM pin 4 default, 200ms debounce, same convention as
+  `receiver_ir.py`) is armed once at startup, and recording is gated on/off
+  around each capture's TDA framing window in `run_one_capture()`. Output:
+  `ir_timestamps/<capture_dir>_ir_timestamps.txt` (one Unix epoch `%.6f` per
+  line). Disable with `--no-ir`; override pin/debounce with `--ir-pin`/`--ir-bounce-ms`.
+  Silently disabled with a printed notice if `RPi.GPIO` isn't importable (e.g. off-Pi).
 
 ---
 
@@ -68,6 +82,7 @@ mmwave-cli/                         ← this repo (runs on Raspberry Pi ~/mmwave
 ├── lora_sender.py                  ← LoRaWAN uplink via Wio-E5 AT commands (Step 5)
 ├── utility.py                      ← check_captured_files(), export_config_to_json(), signal_handler()
 ├── mmwave_json_files/              ← generated .mmwave.json config files (per capture, moved into capture dir after SCP)
+├── ir_timestamps/                  ← generated IR sensor timestamp files (per capture, see mimo.py IR logging)
 ├── dashboard/
 │   ├── ttn-uplink-formatter.js     ← TTN payload decoder (paste into TTN Console)
 │   ├── grafana-dashboard-v0.1.json ← importable Grafana dashboard

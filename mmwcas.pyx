@@ -157,7 +157,7 @@ cdef extern from "ti/mmwave/mmwave.h":
 
 
 
-# 定义程序名称、版本等常量
+# Program name, version, and other constants
 cdef char* PROG_NAME = b"mmwcas"             # Name of the program
 cdef char* PROG_VERSION = b"0.1"             # Program version
 cdef char* PROG_COPYRIGHT = b"Copyright (C) 2024"
@@ -165,9 +165,10 @@ cdef char* PROG_COPYRIGHT = b"Copyright (C) 2024"
 
 cdef int RL_RET_CODE_OK = 0               # Return code for success
 
-# 开发环境标志和其他常量
+# Development environment flag and other constants
 cdef int DEV_ENV = 1
-cdef int NUM_CHIRPS = 12
+cdef int NUM_CHIRPS = 3    # PATCHED: was 12 (full 4-device MIMO). Matches mimo.c -
+                           # 3 chirps, TX0/TX1/TX2 on a single device only.
 
 cdef char* CRED=b"\e[0;31m"    # Terminal code for regular red text
 cdef char* CGREEN=b"\e[0;32m"    # Terminal code for regular greed text
@@ -176,7 +177,7 @@ cdef char* CRESET=b"\e[0m"       # Clear reset terminal color
 cdef int TRUE = 1
 
 
-# 设备配置结构体
+# Device configuration struct
 ctypedef struct devConfig_t:
     uint8_t deviceMap         # Device Map (1: Master, 2: Slave1, 4: Slave2, 8: Slave3)
     uint8_t masterMap         # Master device map (value: 1)
@@ -184,8 +185,9 @@ ctypedef struct devConfig_t:
 
     rlFrameCfg_t frameCfg
 
-    # Profile configuration
-    rlProfileCfg_t profileCfg
+    # Profile configuration - PATCHED: 3 separate profiles instead of 1,
+    # matching mimo.c (idle time differs per chirp: 175us/7us/7us)
+    rlProfileCfg_t profileCfg[3]
 
     # Chirp configuration
     rlChirpCfg_t chirpCfg
@@ -225,40 +227,88 @@ ctypedef struct devConfig_t:
 * start frequency, chirp slope, ramp time, idle time etc. Fine dithering values need
 * to be programmed in chirp configuration \ref rlChirpCfg_t
 * \note Maximum of 4 profiles can be configured.
+*
+* PATCHED: 3 separate profiles instead of 1, matching mimo.c exactly
+* (Cascade_Configuration_Capture_Ready2ArmTrigger.lua geometry):
+*   - startFreq=77GHz, slope=60MHz/us, adcStart=6us, rampEnd=65us,
+*     256 samples @ 8000ksps, rxGain=48dB  -- SAME across all 3
+*   - idleTime DIFFERS per chirp: profile0=175us, profile1=7us, profile2=7us
+*
+* Encoding (same scale factors as the original default, verified against it):
+*   startFreqConst: 1 LSB = 53.6441803 Hz  -> 77GHz unchanged (1435384036)
+*   freqSlopeConst: 1 LSB = 48.2797623 kHz/us -> 60MHz/us = round(60000/48.2797623) = 1243
+*   idleTimeConst / adcStartTimeConst / rampEndTime: 1 LSB = 10ns -> value = us * 100
 */
 """
-cdef rlProfileCfg_t profileCfgArgs=rlProfileCfg_t(
-    profileId = 0,                 # Profile index (0-3)
-    pfVcoSelect = 0x02,            # VCO2 (77G:77 - 81 GHz or 60G:60 - 64 GHz) 77-81GHz use only VCO2
+cdef rlProfileCfg_t profileCfgArgs0=rlProfileCfg_t(
+    profileId = 0,
+    pfVcoSelect = 0x02,
     pfCalLutUpdate = 0,
-    startFreqConst = 1435384036,   # 77GHz | 1 LSB = 53.644 Hz Valid range: 0x5471C71B to 0x5A000000 
-    freqSlopeConst = 311,          # 15.0148 Mhz/us | 1LSB = 48.279 kHz/uS AWR2243 device: -5510 to 5510 (266MHz/uS)
-    idleTimeConst = 500,           # 5us  | 1LSB = 10ns Valid range: 0 to 524287
-    adcStartTimeConst = 600,       # 6us  | 1LSB = 10ns Valid range: 0 to 4095  Time of starting of ADC capture relative to the knee of the ramp.
-    rampEndTime = 4000,            # 40us | 1LSB = 10ns End of ramp time relative to the knee of the ramp 77G : 76 - 78 GHz or 77 - 81 GHz
-    txOutPowerBackoffCode = 0x0,   # Concatenated code for output power backoff for TX0, TX1, TX2\n
+    startFreqConst = 1435384036,   # 77GHz
+    freqSlopeConst = 1243,         # 60 MHz/us
+    idleTimeConst = 17500,         # 175us
+    adcStartTimeConst = 600,       # 6us
+    rampEndTime = 6500,            # 65us
+    txOutPowerBackoffCode = 0x0,
     txPhaseShifter = 0x0,
-    txStartTime = 0x0,             # 0us | 1LSB = 10ns
-    numAdcSamples = 256,           # 256 ADC samples per chirp
-    digOutSampleRate = 8000,       # 8000 ksps (8 MHz) | 1LSB = 1 ksps
-    hpfCornerFreq1 = 0x0,          # 175kHz
-    hpfCornerFreq2 = 0x0,          # 350kHz
+    txStartTime = 0x0,             # 0us
+    numAdcSamples = 256,
+    digOutSampleRate = 8000,       # 8000 ksps
+    hpfCornerFreq1 = 0x0,
+    hpfCornerFreq2 = 0x0,
+    rxGain = 48,
+)
+
+cdef rlProfileCfg_t profileCfgArgs1=rlProfileCfg_t(
+    profileId = 1,
+    pfVcoSelect = 0x02,
     pfCalLutUpdate = 0,
-    rxGain = 48,                   # 48 dB | 1LSB = 1dB
+    startFreqConst = 1435384036,   # 77GHz
+    freqSlopeConst = 1243,         # 60 MHz/us
+    idleTimeConst = 700,           # 7us
+    adcStartTimeConst = 600,       # 6us
+    rampEndTime = 6500,            # 65us
+    txOutPowerBackoffCode = 0x0,
+    txPhaseShifter = 0x0,
+    txStartTime = 0x0,
+    numAdcSamples = 256,
+    digOutSampleRate = 8000,
+    hpfCornerFreq1 = 0x0,
+    hpfCornerFreq2 = 0x0,
+    rxGain = 48,
+)
+
+cdef rlProfileCfg_t profileCfgArgs2=rlProfileCfg_t(
+    profileId = 2,
+    pfVcoSelect = 0x02,
     pfCalLutUpdate = 0,
+    startFreqConst = 1435384036,   # 77GHz
+    freqSlopeConst = 1243,         # 60 MHz/us
+    idleTimeConst = 700,           # 7us
+    adcStartTimeConst = 600,       # 6us
+    rampEndTime = 6500,            # 65us
+    txOutPowerBackoffCode = 0x0,
+    txPhaseShifter = 0x0,
+    txStartTime = 0x0,
+    numAdcSamples = 256,
+    digOutSampleRate = 8000,
+    hpfCornerFreq1 = 0x0,
+    hpfCornerFreq2 = 0x0,
+    rxGain = 48,
 )
 
 """! \brief
-* Frame config API parameters
+* Frame config API parameters - PATCHED to match mimo.c's geometry (3 chirps,
+* 255 loops, 100ms periodicity), matching Cascade_Configuration_Capture_Ready2ArmTrigger.lua
 """
 cdef rlFrameCfg_t frameCfgArgs=rlFrameCfg_t(
     chirpStartIdx = 0,
-    chirpEndIdx = 11,
-    numFrames = 0,                 # (0 for infinite)
-    numLoops = 16,
-    numAdcSamples = 2 * 256,       # Complex samples (for I and Q siganls)
+    chirpEndIdx = 2,                # PATCHED: was 11 (12-chirp scheme), now 3 chirps
+    numFrames = 0,                  # (0 for infinite)
+    numLoops = 255,                  # PATCHED: was 16, now 255 (matches nchirp_loops)
+    numAdcSamples = 2 * 256,        # Complex samples (for I and Q siganls)
     frameTriggerDelay = 0x0,
-    framePeriodicity = 20000000,   # 100ms | 1LSB = 5ns
+    framePeriodicity = 20000000,    # 100ms | 1LSB = 5ns
 )
 
 """! \brief
@@ -405,31 +455,47 @@ cpdef uint32_t configureMimoChirp(uint8_t devId, rlChirpCfg_t chirpCfg):
     #* @param devId Device ID (0: master, 1: slave1, 2: slave2, 3: slave3)
     #* @param chirpCfg Initital chirp configuration
     #* @return uint32_t Configuration status
+
+    PATCHED TX table: matches mimo.c exactly - ONLY Dev4 (slave3, devId 3)
+    transmits, one TX antenna per chirp (TX0 on chirp0, TX1 on chirp1, TX2
+    on chirp2). Dev1/Dev2/Dev3 are 100% RX-only on every chirp (rows are all
+    0xFF, an invalid sentinel that never matches a real chirp index 0-2).
+
+    Original (unpatched) table implemented TI's full 12-chirp, 4-device MIMO
+    scheme where every device transmits on 3 of 12 chirps.
     """
-    # 定义设备的 Tx 表
-    cdef uint8_t[4][3] chripTxTable=[[11,10,9],[8,7,6],[5,4,3],[2,1,0]]
-    
-    # 定义状态变量
+    cdef uint8_t[4][3] chripTxTable=[
+        [0xFF, 0xFF, 0xFF],  # Dev1 - Master: RX only, never transmits
+        [0xFF, 0xFF, 0xFF],  # Dev2 - Slave1: RX only, never transmits
+        [0xFF, 0xFF, 0xFF],  # Dev3 - Slave2: RX only, never transmits
+        [0, 1, 2],           # Dev4 - Slave3: TX0/TX1/TX2 on chirp0/1/2
+    ]
+
     cdef int status = 0
     cdef uint8_t i
     cdef int8_t txIdx
-    
+
     for i in range(NUM_CHIRPS):
         txIdx = is_in_table(i, chripTxTable[devId], 3)
 
-        # 更新 chirp 配置
+        # Update chirp configuration
         chirpCfg.chirpStartIdx = i
         chirpCfg.chirpEndIdx = i
+        # PATCHED: select the profile matching this chirp index (chirp0->profile0
+        # with 175us idle, chirp1/2->profile1/2 with 7us idle) - same profile
+        # used across ALL devices for a given chirp index, matching mimo.c.
+        chirpCfg.profileId = i
         if txIdx < 0:
             chirpCfg.txEnable = 0x00
         else:
             chirpCfg.txEnable = (1 << txIdx)
 
-        # 配置 chirp 并更新状态
+        # Configure chirp and update status
         status += MMWL_chirpConfig(createDevMapFromDevId(devId), chirpCfg)
 
-        # 打印调试信息
-        printf(b"[CHIRP CONFIG] dev %u, chirp idx %u, status: %d\n", devId, i, status)
+        # Print debug info
+        printf(b"[CHIRP CONFIG] dev %u, chirp idx %u, profileId %u, txEnable 0x%02x, status: %d\n",
+               devId, i, chirpCfg.profileId, chirpCfg.txEnable, status)
         if status != 0:
             printf(b"Configuration of chirp %d failed!\n", i)
             break
@@ -449,11 +515,11 @@ cdef void check(int status, char* success_msg, char* error_msg,
     @note: Status is considered successful when the status integer is 0.
     Any other value is considered a failure.
     """
-    # 模拟 DEV_ENV 环境下的调试信息
+    # Debug info printed under DEV_ENV
     if DEV_ENV:
         printf(b"STATUS %4d | DEV MAP: %2u | ", status, deviceMap)
 
-    # 检查状态
+    # Check status
     if status == RL_RET_CODE_OK:
         if DEV_ENV:
             #printf(CGREEN)
@@ -468,7 +534,7 @@ cdef void check(int status, char* success_msg, char* error_msg,
             #printf(CRESET)
             printf("\n")
         
-        # 如果 is_required 为非零，则退出程序
+        # If is_required is non-zero, exit the program
         if is_required != 0:
             exit(status)
 
@@ -600,7 +666,11 @@ cdef uint32_t configure (devConfig_t config):
         b"[ALL] Datapath configuration successful!",
         b"[ALL] Datapath configuration failed!", config.deviceMap, TRUE)
 
-    status += MMWL_profileConfig(config.deviceMap, config.profileCfg)
+    # PATCHED: 3 separate profile configs instead of 1, matching the 3
+    # different idle times used per chirp (175us/7us/7us)
+    status += MMWL_profileConfig(config.deviceMap, config.profileCfg[0])
+    status += MMWL_profileConfig(config.deviceMap, config.profileCfg[1])
+    status += MMWL_profileConfig(config.deviceMap, config.profileCfg[2])
     check(status,
         b"[ALL] Profile configuration successful!",
         b"[ALL] Profile configuration failed!", config.deviceMap, TRUE)
@@ -620,7 +690,8 @@ cdef uint32_t configure (devConfig_t config):
         config.channelCfg,
         config.adcOutCfg,
         config.datapathCfg,
-        config.profileCfg
+        config.profileCfg[0]   # PATCHED: array now; [0] fine since only
+                                # numAdcSamples is used here, identical across profiles
     )
     check(status,
         b"[MASTER] Frame configuration completed!",
@@ -633,7 +704,7 @@ cdef uint32_t configure (devConfig_t config):
         config.channelCfg,
         config.adcOutCfg,  
         config.datapathCfg,
-        config.profileCfg
+        config.profileCfg[0]   # PATCHED: array now; [0] fine, see note above
     )
     check(status,
         b"[SLAVE] Frame configuration completed!",
@@ -648,7 +719,9 @@ cpdef mmw_set_config(dict configdict):
     config.deviceMap = 1|(1<<1)|(1<<2)|(1<<3)
     MMWL_AssignDeviceMap(config.deviceMap, &config.masterMap, &config.slavesMap)
     config.frameCfg = frameCfgArgs
-    config.profileCfg = profileCfgArgs
+    config.profileCfg[0] = profileCfgArgs0  # PATCHED: 3 profiles instead of 1
+    config.profileCfg[1] = profileCfgArgs1
+    config.profileCfg[2] = profileCfgArgs2
     config.chirpCfg = chirpCfgArgs
     config.channelCfg = channelCfgArgs
     config.csi2LaneCfg = csi2LaneCfgArgs
@@ -664,31 +737,33 @@ cpdef mmw_set_config(dict configdict):
     if "mimo" in configdict:
         mimo = configdict["mimo"]
         if "profile" in mimo: # [PROFILE CONFIGURATION]
+            # NOTE: idle time is intentionally NOT configurable here - it's
+            # fixed per-profile (175us/7us/7us) to match mimo.c's PATCHED
+            # 3-profile geometry. All other fields below are applied
+            # identically to all 3 profile slots (SAME across all 3, like
+            # mimo.c's profileCfgArgs0/1/2).
             profile = mimo["profile"]
-            if "id" in profile:
-                config.profileCfg.profileId = <uint16_t>(profile["id"])
-            if "startFrequency" in profile: # Chirp start frequency in GHz
-                config.profileCfg.startFreqConst = <uint32_t>(ceil(profile["startFrequency"]*1e9/53.644)) # 1LSB = 53.644 Hz
-            if "frequencySlope" in profile: # Frequency slope in MHz/us
-                config.profileCfg.freqSlopeConst = <int16_t>(ceil(profile["frequencySlope"]*1e3/48.279)) # 1LSB = 48.279 kHz/us
-            if "idleTime" in profile:# Chrip Idle time in us
-                config.profileCfg.idleTimeConst = <uint32_t>(ceil(profile["idleTime"]*1e2)) # 1LSB = 10ns
-            if "adcStartTime" in profile:# ADC start time in us
-                config.profileCfg.adcStartTimeConst = <uint32_t>(ceil(profile["adcStartTime"]*1e2)) # 1LSB = 10ns
-            if "rampEndTime" in profile:# Chirp ramp end time in us
-                config.profileCfg.rampEndTime = <uint32_t>(ceil(profile["rampEndTime"]*1e2)) # 1LSB = 10ns
-            if "txStartTime" in profile:# TX starttime in us
-                config.profileCfg.txStartTime = <uint16_t>(ceil(profile["txStartTime"]*1e2)) # 1LSB = 10ns
-            if "numAdcSamples" in profile:# Number of ADC samples per chirp
-                config.profileCfg.numAdcSamples = <uint16_t>(profile["numAdcSamples"])
-            if "adcSamplingFrequency" in profile:# ADC sampling frequency in ksps
-                config.profileCfg.digOutSampleRate = <uint16_t>(profile["adcSamplingFrequency"])
-            if "rxGain" in profile:# rxGain in dB
-                config.profileCfg.rxGain = <uint16_t>(profile["rxGain"])
-            if "hpfCornerFreq1" in profile: # hpfCornerFreq1
-                config.profileCfg.hpfCornerFreq1 = <uint8_t>(profile["hpfCornerFreq1"])
-            if "hpfCornerFreq2" in profile: # hpfCornerFreq2
-                config.profileCfg.hpfCornerFreq2 = <uint8_t>(profile["hpfCornerFreq2"])
+            for pIdx in range(3):
+                if "startFrequency" in profile: # Chirp start frequency in GHz
+                    config.profileCfg[pIdx].startFreqConst = <uint32_t>(ceil(profile["startFrequency"]*1e9/53.644)) # 1LSB = 53.644 Hz
+                if "frequencySlope" in profile: # Frequency slope in MHz/us
+                    config.profileCfg[pIdx].freqSlopeConst = <int16_t>(ceil(profile["frequencySlope"]*1e3/48.279)) # 1LSB = 48.279 kHz/us
+                if "adcStartTime" in profile:# ADC start time in us
+                    config.profileCfg[pIdx].adcStartTimeConst = <uint32_t>(ceil(profile["adcStartTime"]*1e2)) # 1LSB = 10ns
+                if "rampEndTime" in profile:# Chirp ramp end time in us
+                    config.profileCfg[pIdx].rampEndTime = <uint32_t>(ceil(profile["rampEndTime"]*1e2)) # 1LSB = 10ns
+                if "txStartTime" in profile:# TX starttime in us
+                    config.profileCfg[pIdx].txStartTime = <uint16_t>(ceil(profile["txStartTime"]*1e2)) # 1LSB = 10ns
+                if "numAdcSamples" in profile:# Number of ADC samples per chirp
+                    config.profileCfg[pIdx].numAdcSamples = <uint16_t>(profile["numAdcSamples"])
+                if "adcSamplingFrequency" in profile:# ADC sampling frequency in ksps
+                    config.profileCfg[pIdx].digOutSampleRate = <uint16_t>(profile["adcSamplingFrequency"])
+                if "rxGain" in profile:# rxGain in dB
+                    config.profileCfg[pIdx].rxGain = <uint16_t>(profile["rxGain"])
+                if "hpfCornerFreq1" in profile: # hpfCornerFreq1
+                    config.profileCfg[pIdx].hpfCornerFreq1 = <uint8_t>(profile["hpfCornerFreq1"])
+                if "hpfCornerFreq2" in profile: # hpfCornerFreq2
+                    config.profileCfg[pIdx].hpfCornerFreq2 = <uint8_t>(profile["hpfCornerFreq2"])
             
         if "frame" in mimo: # [FRAME CONFIGURATION]
             frame = mimo["frame"]
@@ -704,7 +779,7 @@ cpdef mmw_set_config(dict configdict):
                 config.channelCfg.rxChannelEn = <uint16_t>(channel["rxChannelEn"])
             if "txChannelEn" in channel: # TX Channel configuration
                 config.channelCfg.txChannelEn = <uint16_t>(channel["txChannelEn"])
-        config.frameCfg.numAdcSamples = 2 * config.profileCfg.numAdcSamples
+        config.frameCfg.numAdcSamples = 2 * config.profileCfg[0].numAdcSamples
         config.dataFmtCfg.rxChannelEn = config.channelCfg.rxChannelEn
         
     config.dataFmtCfg.rxChannelEn = channelCfgArgs.rxChannelEn
