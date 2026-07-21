@@ -686,7 +686,19 @@ int main (int argc, char *argv[]) {
   int status = 0;
   float default_recording_duration = 1.0;   // min
 
-  parser_t parser = init_parser(
+  /**
+   * static: g_parser (set below) and every option_t added to it via add_arg()
+   * are dereferenced by cleanup(), which only runs via atexit() AFTER main()
+   * has already returned. Stack-local storage for these would make that a
+   * use-after-return (UB) - this was segfaulting on exit after every capture,
+   * right after a clean run_capture(), which meant the process died via
+   * SIGSEGV instead of exiting normally - never giving the TDA's Ethernet
+   * capture-manager connection a clean close, which is the most likely
+   * explanation for the TDA getting stuck (STATUS 0 everywhere, 0-byte
+   * .bin files) until a full board reboot.
+   */
+  static parser_t parser;
+  parser = init_parser(
     PROG_NAME,
     "Configuration and control tool for TI MMWave cascade Evaluation Module"
   );
@@ -695,34 +707,37 @@ int main (int argc, char *argv[]) {
   atexit(cleanup);  // Call the cleanup function before exiting the program
   signal(SIGINT, signal_handler);  // Catch CTRL+C to enable memory deallocation
 
-  option_t opt_capturedir = {
+  // NOTE: .default_value is assigned below, not in the initializer - it
+  // points at a stack-local variable (address not known until runtime),
+  // and static-storage initializers must be compile-time constants.
+  static option_t opt_capturedir = {
     .args = "-d",
     .argl = "--capture-dir",
     .help = "Name of the director where to store recordings on the DSP board",
     .type = OPT_STR,
-    .default_value = default_capture_directory
   };
+  opt_capturedir.default_value = default_capture_directory;
   add_arg(&parser, &opt_capturedir);
 
-  option_t opt_port = {
+  static option_t opt_port = {
     .args = "-p",
     .argl = "--port",
     .help = "Port number the DSP board server app is listening on",
     .type = OPT_INT,
-    .default_value = &default_port,
   };
+  opt_port.default_value = &default_port;
   add_arg(&parser, &opt_port);
 
-  option_t opt_ipaddr = {
+  static option_t opt_ipaddr = {
     .args = "-i",
     .argl = "--ip-addr",
     .help = "IP Address of the MMWCAS DSP evaluation module",
     .type = OPT_STR,
-    .default_value = default_ip_addr,
   };
+  opt_ipaddr.default_value = default_ip_addr;
   add_arg(&parser, &opt_ipaddr);
 
-  option_t opt_config = {
+  static option_t opt_config = {
     .args = "-c",
     .argl = "--configure",
     .help = "Configure the MMWCAS-RF-EVM board",
@@ -730,7 +745,7 @@ int main (int argc, char *argv[]) {
   };
   add_arg(&parser, &opt_config);
 
-  option_t opt_record = {
+  static option_t opt_record = {
     .args = "-r",
     .argl = "--record",
     .help = "Trigger data recording. This assumes that configuration is completed.",
@@ -738,7 +753,7 @@ int main (int argc, char *argv[]) {
   };
   add_arg(&parser, &opt_record);
 
-  option_t opt_interactive = {
+  static option_t opt_interactive = {
     .args = "-I",
     .argl = "--interactive",
     .help = "Configure once (requires --configure), then repeatedly prompt for an "
@@ -749,16 +764,16 @@ int main (int argc, char *argv[]) {
   };
   add_arg(&parser, &opt_interactive);
 
-  option_t opt_record_duration = {
+  static option_t opt_record_duration = {
     .args = "-t",
     .argl = "--time",
     .help = "Indicate how long the recording should last in minutes. Default: 1 min",
     .type = OPT_FLOAT,
-    .default_value = &default_recording_duration,
   };
+  opt_record_duration.default_value = &default_recording_duration;
   add_arg(&parser, &opt_record_duration);
 
-  option_t opt_config_file = {
+  static option_t opt_config_file = {
     .args = "-f",
     .argl = "--cfg",
     .help = "TOML Configuration file. Overwrite the default config when provided",
@@ -767,7 +782,7 @@ int main (int argc, char *argv[]) {
   };
   add_arg(&parser, &opt_config_file);
 
-  option_t opt_help = {
+  static option_t opt_help = {
     .args = "-h",
     .argl = "--help",
     .help = "Print CLI option help and exit.",
@@ -777,7 +792,7 @@ int main (int argc, char *argv[]) {
   };
   add_arg(&parser, &opt_help);
 
-  option_t opt_version = {
+  static option_t opt_version = {
     .args = "-v",
     .argl = "--version",
     .help = "Print program version and exit.",
