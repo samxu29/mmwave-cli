@@ -27,7 +27,10 @@
 */
 #define DEV_ENV    1
 
-#define NUM_CHIRPS 12
+#define NUM_CHIRPS 3        // PATCHED: was 12 (full 4-device MIMO). This setup
+                            // uses 3 chirps, TX0/TX1/TX2 on the MASTER only -
+                            // slaves are RX-only (matches the working Lua config
+                            // Cascade_Configuration_Capture_Ready2ArmTrigger.lua)
 
 #define CRED      "\e[0;31m"    // Terminal code for regular red text
 #define CGREEN    "\e[0;32m"    // Terminal code for regular greed text
@@ -49,8 +52,11 @@ typedef struct devConfig {
   // Frame config
   rlFrameCfg_t frameCfg;
 
-  // Profile config
-  rlProfileCfg_t profileCfg;
+  // Profile config - PATCHED: 3 separate profiles (idle time differs per
+  // chirp: 175us/7us/7us), matching the Lua script's 3-profile setup.
+  // profileCfg[0] = chirp0 (Idle 175us), profileCfg[1] = chirp1 (Idle 7us),
+  // profileCfg[2] = chirp2 (Idle 7us)
+  rlProfileCfg_t profileCfg[3];
 
   // Chirp config
   rlChirpCfg_t chirpCfg;

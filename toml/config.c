@@ -31,7 +31,7 @@ void read_mimo_config(toml_table_t* configfile, devConfig_t *config) {
         if (profile != NULL) {
             data = toml_int_in(profile, "id");
             if (data.ok) {
-                config->profileCfg.profileId = (uint16_t)data.u.i;
+                config->profileCfg[0].profileId = (uint16_t)data.u.i;
             } else {
                 DEBUG_PRINT(CONFIG_FIELD_ERROR_MSG "'id'\n");
             }
@@ -39,7 +39,7 @@ void read_mimo_config(toml_table_t* configfile, devConfig_t *config) {
             // Chirp start frequency in GHz
             data = toml_double_in(profile, "startFrequency");
             if (data.ok) {
-                config->profileCfg.startFreqConst = (uint32_t)ceil(
+                config->profileCfg[0].startFreqConst = (uint32_t)ceil(
                     // 1LSB = 53.644 Hz
                     (data.u.d * 1e9) / 53.644);
             } else {
@@ -49,7 +49,7 @@ void read_mimo_config(toml_table_t* configfile, devConfig_t *config) {
             // Frequency slope in MHz/us
             data = toml_double_in(profile, "frequencySlope");
             if (data.ok) {
-                config->profileCfg.freqSlopeConst = (uint16_t)ceil(
+                config->profileCfg[0].freqSlopeConst = (uint16_t)ceil(
                     // 1LSB = 48.279 kHz/us
                     (data.u.d * 1e3) / 48.279);
             } else {
@@ -59,7 +59,7 @@ void read_mimo_config(toml_table_t* configfile, devConfig_t *config) {
             // Chrip Idle time in us
             data = toml_double_in(profile, "idleTime");
             if (data.ok) {
-                config->profileCfg.idleTimeConst = (uint32_t)ceil(
+                config->profileCfg[0].idleTimeConst = (uint32_t)ceil(
                     // 1LSB = 10ns
                     (data.u.d * 1e2));
             } else {
@@ -69,7 +69,7 @@ void read_mimo_config(toml_table_t* configfile, devConfig_t *config) {
             // ADC start time in us
             data = toml_double_in(profile, "adcStartTime");
             if (data.ok) {
-                config->profileCfg.adcStartTimeConst = (uint32_t)ceil(
+                config->profileCfg[0].adcStartTimeConst = (uint32_t)ceil(
                     // 1LSB = 10ns
                     (data.u.d * 1e2));
             } else {
@@ -79,7 +79,7 @@ void read_mimo_config(toml_table_t* configfile, devConfig_t *config) {
             // Chirp ramp end time in us
             data = toml_double_in(profile, "rampEndTime");
             if (data.ok) {
-                config->profileCfg.rampEndTime = (uint32_t)ceil(
+                config->profileCfg[0].rampEndTime = (uint32_t)ceil(
                     // 1LSB = 10ns
                     (data.u.d * 1e2));
             } else {
@@ -89,7 +89,7 @@ void read_mimo_config(toml_table_t* configfile, devConfig_t *config) {
             // TX starttime in us
             data = toml_double_in(profile, "txStartTime");
             if (data.ok) {
-                config->profileCfg.txStartTime = (uint16_t)ceil(
+                config->profileCfg[0].txStartTime = (uint16_t)ceil(
                     // 1LSB = 10ns
                     (data.u.d * 1e2));
             } else {
@@ -99,7 +99,7 @@ void read_mimo_config(toml_table_t* configfile, devConfig_t *config) {
             // Number of ADC samples per chirp
             data = toml_int_in(profile, "numAdcSamples");
             if (data.ok) {
-                config->profileCfg.numAdcSamples = (uint16_t)data.u.i;
+                config->profileCfg[0].numAdcSamples = (uint16_t)data.u.i;
             } else {
                 DEBUG_PRINT(CONFIG_FIELD_ERROR_MSG "'numAdcSamples'\n");
             }
@@ -107,7 +107,7 @@ void read_mimo_config(toml_table_t* configfile, devConfig_t *config) {
             // ADC sampling frequency in ksps
             data = toml_int_in(profile, "adcSamplingFrequency");
             if (data.ok) {
-                config->profileCfg.digOutSampleRate = (uint16_t)data.u.i;
+                config->profileCfg[0].digOutSampleRate = (uint16_t)data.u.i;
             } else {
                 DEBUG_PRINT(CONFIG_FIELD_ERROR_MSG "'adcSamplingFrequency'\n");
             }
@@ -115,7 +115,7 @@ void read_mimo_config(toml_table_t* configfile, devConfig_t *config) {
             // rxGain in dB
             data = toml_int_in(profile, "rxGain");
             if (data.ok) {
-                config->profileCfg.rxGain = (uint16_t)data.u.i;
+                config->profileCfg[0].rxGain = (uint16_t)data.u.i;
             } else {
                 DEBUG_PRINT(CONFIG_FIELD_ERROR_MSG "'rxGain'\n");
             }
@@ -123,7 +123,7 @@ void read_mimo_config(toml_table_t* configfile, devConfig_t *config) {
             // hpfCornerFreq1
             data = toml_int_in(profile, "hpfCornerFreq1");
             if (data.ok) {
-                config->profileCfg.hpfCornerFreq1 = (uint8_t)data.u.i;
+                config->profileCfg[0].hpfCornerFreq1 = (uint8_t)data.u.i;
             } else {
                 DEBUG_PRINT(CONFIG_FIELD_ERROR_MSG "'hpfCornerFreq1'\n");
             }
@@ -131,7 +131,7 @@ void read_mimo_config(toml_table_t* configfile, devConfig_t *config) {
             // hpfCornerFreq2
             data = toml_int_in(profile, "hpfCornerFreq2");
             if (data.ok) {
-                config->profileCfg.hpfCornerFreq2 = (uint8_t)data.u.i;
+                config->profileCfg[0].hpfCornerFreq2 = (uint8_t)data.u.i;
             } else {
                 DEBUG_PRINT(CONFIG_FIELD_ERROR_MSG "'hpfCornerFreq2'\n");
             }
@@ -186,7 +186,7 @@ void read_mimo_config(toml_table_t* configfile, devConfig_t *config) {
                 DEBUG_PRINT(CONFIG_FIELD_ERROR_MSG "'txChannelEn'\n");
             }
         }
-        config->frameCfg.numAdcSamples = 2 * config->profileCfg.numAdcSamples;
+        config->frameCfg.numAdcSamples = 2 * config->profileCfg[0].numAdcSamples;
         config->dataFmtCfg.rxChannelEn = config->channelCfg.rxChannelEn;
     }
 }
