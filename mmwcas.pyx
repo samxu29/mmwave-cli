@@ -232,7 +232,12 @@ ctypedef struct devConfig_t:
 * PATCHED: 3 separate profiles instead of 1, matching mimo.c exactly
 * (Cascade_Configuration_Capture_Ready2ArmTrigger.lua geometry):
 *   - startFreq=77GHz, slope=60MHz/us, adcStart=6us, rampEnd=65us,
-*     256 samples @ 8000ksps, rxGain=48dB  -- SAME across all 3
+*     256 samples @ 4400ksps, rxGain=48dB  -- SAME across all 3
+*     (2026-07-22: digOutSampleRate corrected 8000->4400 to match the
+*     AWR1843 reference config's SAMPLE_RATE. These cdef defaults are
+*     fallback values only - mimo.py's config_dict["adcSamplingFrequency"]
+*     always overrides digOutSampleRate at runtime via mmw_set_config below,
+*     so no rebuild is required for the mimo.py pipeline path.)
 *   - idleTime DIFFERS per chirp: profile0=175us, profile1=7us, profile2=7us
 *
 * Encoding (same scale factors as the original default, verified against it):
@@ -254,7 +259,7 @@ cdef rlProfileCfg_t profileCfgArgs0=rlProfileCfg_t(
     txPhaseShifter = 0x0,
     txStartTime = 0x0,             # 0us
     numAdcSamples = 256,
-    digOutSampleRate = 8000,       # 8000 ksps
+    digOutSampleRate = 4400,       # 4400 ksps (matches AWR1843 reference)
     hpfCornerFreq1 = 0x0,
     hpfCornerFreq2 = 0x0,
     rxGain = 48,
@@ -273,7 +278,7 @@ cdef rlProfileCfg_t profileCfgArgs1=rlProfileCfg_t(
     txPhaseShifter = 0x0,
     txStartTime = 0x0,
     numAdcSamples = 256,
-    digOutSampleRate = 8000,
+    digOutSampleRate = 4400,
     hpfCornerFreq1 = 0x0,
     hpfCornerFreq2 = 0x0,
     rxGain = 48,
@@ -292,7 +297,7 @@ cdef rlProfileCfg_t profileCfgArgs2=rlProfileCfg_t(
     txPhaseShifter = 0x0,
     txStartTime = 0x0,
     numAdcSamples = 256,
-    digOutSampleRate = 8000,
+    digOutSampleRate = 4400,
     hpfCornerFreq1 = 0x0,
     hpfCornerFreq2 = 0x0,
     rxGain = 48,

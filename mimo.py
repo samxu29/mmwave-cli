@@ -11,6 +11,12 @@ Cascade_Configuration_Capture_Ready2ArmTrigger.lua:
     chirp TX geometry live in config_dict below (also written to .mmwave.json).
   - 60 MHz/us slope, 65us ramp-end, 255 loops/frame, 100ms frame periodicity
     (10 Hz frame rate).
+  - adcSamplingFrequency = 4400 ksps (2026-07-22: corrected from 8000 to match
+    the AWR1843 reference config's SAMPLE_RATE, lua_reference/mmMesh_1843_
+    distributed_v3_qm_radar0.lua). mimo.c / mmwcas.pyx cdef defaults still say
+    8000 in comments/structs but are fully overridden at runtime by this
+    dict's "adcSamplingFrequency" (see mmwcas.pyx mmw_set_config) - not
+    functionally stale, just cosmetically out of lockstep until next edit.
 
 Two capture modes, both configure the radar ONCE then loop:
   - Default: automatic loop, driven by --num-loops/--inter-loop-time (used by
@@ -69,7 +75,7 @@ config_dict = {
             "idleTimes": [175, 7, 7],
             "adcStartTime": 6,              # ADC start time in us
             "numAdcSamples": 256,           # Number of ADC samples per chirp
-            "adcSamplingFrequency": 8000,   # ADC sampling frequency in ksps
+            "adcSamplingFrequency": 4400,   # ADC sampling frequency in ksps (matches AWR1843 reference SAMPLE_RATE)
             "rampEndTime": 65,              # Chirp ramp end time in us (mimo.c PATCHED value)
             "rxGain": 48,                   # dB
             "txStartTime": 0,               # TX starttime in us

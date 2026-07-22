@@ -50,7 +50,7 @@ python3 -c "import mmwcas; print('mmwcas OK')"
 - `framePeriodicity = 100 ms` → frame rate = 10 Hz (was 50ms/20Hz — halves the max
   detectable structural vibration frequency to ~5 Hz by Nyquist; revisit
   `FREQ_MAX` in `~/IoSAR-EdgeProcessing/ps_monitoring.py` if this matters)
-- `numAdcSamples = 256`, `adcSamplingFrequency = 8000 ksps`
+- `numAdcSamples = 256`, `adcSamplingFrequency = 4400 ksps` (corrected 2026-07-22 to match AWR1843 reference `SAMPLE_RATE`)
 - `frequencySlope = 60 MHz/μs`, `rampEndTime = 65 μs`
 - `numLoops = 255` chirp loops per frame (was 16)
 - 3 chirps only (not 12), single TX device (TX0/TX1/TX2 on chirp0/1/2), 3 profiles
