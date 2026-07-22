@@ -925,13 +925,30 @@ cpdef int mmw_start_frame():
         0)
     return status
 
+cdef int RL_RET_CODE_FRAME_ALREADY_ENDED = 21  # see ti/mmwavelink/mmwavelink.h
+
 cpdef int mmw_stop_frame():
+    """
+    Stop framing on all 4 devices (3, 2, 1, 0 order).
+
+    Since mmw_reconfigure_frame_count() makes frameCfg.numFrames finite for
+    every capture, each RF chip auto-stops itself once it has emitted its
+    last frame - it does not wait around for an explicit STOP. By the time
+    the host's wait_s margin has elapsed and this runs, a device that
+    finished on its own legitimately answers RL_RET_CODE_FRAME_ALREADY_ENDED
+    (21) to STOP, not a real error (mmw_stop_frame() is then effectively a
+    no-op / safety net rather than what actually ends the capture). Treat
+    that specific per-device code as success; still surface any other
+    non-zero status as a genuine failure.
+    """
     cdef int status = 0
     cdef int i
-    # Stop devices sequentially (3, 2, 1, 0)
+    cdef int dev_status
     for i in range(3, -1, -1):
-        status += MMWL_StopFrame(1 << i)
-    
+        dev_status = MMWL_StopFrame(1 << i)
+        if dev_status != RL_RET_CODE_FRAME_ALREADY_ENDED:
+            status += dev_status
+
     check(status,
         b"[MMWCAS-RF] Stopped Frame ...",
         b"[MMWCAS-RF] Failed to stop frame!", 
