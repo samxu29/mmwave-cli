@@ -324,6 +324,13 @@ def main():
                         help="Configure once, then repeatedly prompt for an experiment name and "
                              "record - no reconfiguration between captures. At the prompt, type "
                              "'<name>' or '<name> <frames>' to capture, or 'quit'/blank to exit.")
+    parser.add_argument('--prompt-name',
+                        action='store_true',
+                        help="In the automatic loop (--num-loops, NOT --interactive), prompt for "
+                             "an experiment name before each capture. Frame count stays fixed at "
+                             "--frames the whole run (no live RF reconfiguration - safe/exact, "
+                             "unlike --interactive's per-prompt frame count). Blank = reuse the "
+                             "last name; 'quit'/'exit' stops the loop early.")
     parser.add_argument('--no-ir',
                         action='store_true',
                         help='Disable IR sensor timestamp logging entirely (default: enabled if '
@@ -415,6 +422,12 @@ def main():
     # Automatic capture loop
     loop_count = 0
     infinite_mode = (args.num_loops == 0)
+    current_label = args.directory
+
+    if args.prompt_name:
+        print(f"\n[--prompt-name] Will ask for an experiment name before each capture "
+              f"(frame count fixed at {args.frames} the whole run - no RF reconfiguration).")
+        print("Blank = reuse the last name; 'quit'/'exit' stops the loop early.\n")
 
     try:
         while True:
@@ -426,15 +439,26 @@ def main():
                 print("\n Shutdown requested. Exiting capture loop...")
                 break
 
+            if args.prompt_name:
+                try:
+                    typed = input(f"experiment name [{current_label}]> ").strip()
+                except EOFError:
+                    break
+                if typed in ("quit", "exit"):
+                    break
+                if typed:
+                    current_label = typed
+
             loop_count += 1
 
             print("\n" + "="*60)
             print(f"CAPTURE LOOP {loop_count}" + (" (INFINITE MODE)" if infinite_mode else f" of {args.num_loops}"))
             print("="*60)
+            print(f"Experiment name : {current_label}")
             print(f"Recording frames: {args.frames}  (~{args.frames * period_s:.1f}s)")
             print("="*60)
 
-            status, capture_dir = run_one_capture(args.directory, args.frames, args.tda_ip)
+            status, capture_dir = run_one_capture(current_label, args.frames, args.tda_ip)
             if status != 0:
                 time.sleep(1)
                 continue  # Skip to next loop
