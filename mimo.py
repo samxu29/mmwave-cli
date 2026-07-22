@@ -17,9 +17,10 @@ Two capture modes, both configure the radar ONCE then loop:
     pipeline.py).
   - --interactive: REPL loop mirroring mimo.c's --interactive - type an
     experiment name (+ optional frame count) at the `experiment>` prompt to
-    arm + record; blank/quit/exit to stop. RF is configured with numFrames=0
-    (infinite); each prompt's frame count is applied to TDA arming so captures
-    can have different lengths without reconfiguring the chips.
+    arm + record; blank/quit/exit to stop. Each prompt's frame count is
+    applied to the RF chips via mmw_reconfigure_frame_count() (frame-config
+    RPC only, no full re-init) before arming, so captures are hardware-exact
+    at whatever length you type - not dependent on host wall-clock timing.
 
 IR sensor timestamp logging (replaces the old run_experiment.sh + ir_logger.py
 signal-based glue) is now built in: GPIO edge detection is armed once at
@@ -139,15 +140,18 @@ def save_ir_timestamps(capture_dir):
 def run_one_capture(exp_label, num_frames, tda_ip):
     """
     Arm the TDA, record one capture, de-arm, then verify + export the
-    .mmwave.json sidecar. Does NOT touch the RF chip configuration (profiles/
-    chirps/frame geometry) - only the per-capture arm/trigger/stop sequence,
-    same division of responsibility as mimo.c's run_capture(). Safe to call
-    repeatedly after a single mmw_set_config()/mmw_init() (see --interactive).
+    .mmwave.json sidecar. Same division of responsibility as mimo.c's
+    run_capture(). Safe to call repeatedly after a single mmw_set_config()/
+    mmw_init() (see --interactive).
 
-    Capture length is num_frames: passed to TDA numberOfFramesToCapture on arm,
-    and the host waits num_frames × framePeriodicity + one period margin.
-    (In non-interactive mode the RF chips are also programmed with that
-    numFrames at configure time.)
+    Capture length is num_frames, made hardware-exact via
+    mmw_reconfigure_frame_count(): re-runs ONLY the frame-config RPC on the
+    RF chips (no full re-init) so they hard-stop after exactly num_frames
+    frames, regardless of host-side wall-clock/RPC jitter between
+    mmw_start_frame() and mmw_stop_frame(). The host wait
+    (num_frames × framePeriodicity + one period margin) exists only so we
+    don't call mmw_stop_frame() before the chips are done - it no longer
+    determines how much data gets captured.
 
     Returns (status, capture_dir) - status is 0 on full success.
     """
@@ -158,8 +162,16 @@ def run_one_capture(exp_label, num_frames, tda_ip):
     wait_s = _wait_s_for_frames(num_frames, period_s)
     approx_s = num_frames * period_s
 
+    # Make the RF chips themselves stop after exactly num_frames frames -
+    # keeps interactive mode's per-prompt frame count hardware-exact instead
+    # of depending on wall-clock timing to cut the capture off.
+    status = mmwcas.mmw_reconfigure_frame_count(num_frames)
+    if status != 0:
+        print(f"mmw_reconfigure_frame_count failed (status: {status})")
+        return status, capture_dir
+
     # So .mmwave.json matches this capture even when interactive overrides
-    # the default --frames (RF may still be infinite / numFrames=0).
+    # the default --frames.
     config_dict["mimo"]["frame"]["numFrames"] = num_frames
 
     print(f"\n>>> Capturing '{capture_dir}' — {num_frames} frames "

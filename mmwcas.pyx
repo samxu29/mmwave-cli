@@ -808,6 +808,56 @@ cpdef int mmw_init(
     configure(config) 
     return status
 
+cpdef int mmw_reconfigure_frame_count(int num_frames):
+    """@brief Re-run ONLY the frame configuration RPC (MMWL_frameConfig) for
+    * master + slaves with an updated numFrames, leaving profile/chirp/RF-init/
+    * datapath untouched. This makes the RF chips themselves hard-stop after
+    * exactly num_frames frames, instead of relying on host-side wall-clock
+    * timing (time.sleep + mmw_stop_frame()) to cut the capture off - which is
+    * subject to RPC/network jitter and does not guarantee an exact frame count.
+    *
+    * Used by --interactive mode (mimo.py) so each prompt's frame count is
+    * applied to the actual chip config, not just the TDA arm/host wait,
+    * without paying the cost of a full mmw_init()/configure() (firmware
+    * re-download, RF re-init, etc.) between captures.
+    *
+    * @num_frames Exact number of frames the chips should record (0 = infinite,
+    *             same semantics as frame.numFrames in radar_configs/*.toml).
+    * @return int Aggregate status (0 on full success)
+    """
+    cdef int status = 0
+    if not _config_applied:
+        raise RuntimeError(
+            "mmw_set_config() must be called before mmw_reconfigure_frame_count()."
+        )
+    config.frameCfg.numFrames = <uint16_t>num_frames
+
+    status += MMWL_frameConfig(
+        config.masterMap,
+        config.frameCfg,
+        config.channelCfg,
+        config.adcOutCfg,
+        config.datapathCfg,
+        config.profileCfg[0]
+    )
+    check(status,
+        b"[MASTER] Frame count reconfigured!",
+        b"[MASTER] Frame count reconfiguration failed!", config.masterMap, TRUE)
+
+    status += MMWL_frameConfig(
+        config.slavesMap,
+        config.frameCfg,
+        config.channelCfg,
+        config.adcOutCfg,
+        config.datapathCfg,
+        config.profileCfg[0]
+    )
+    check(status,
+        b"[SLAVE] Frame count reconfigured!",
+        b"[SLAVE] Frame count reconfiguration failed!", config.slavesMap, TRUE)
+
+    return status
+
 cpdef int mmw_arming_tda(str capture_path, int num_frames=-1):
     """@brief Prepare the TDA board and notify TDA about the start of recording
     * @capture_path capture path setup to arm the TDA for recording

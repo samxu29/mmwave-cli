@@ -11,7 +11,7 @@ def _ls_capture_dir(remote_path, tda_ip):
         "-oStrictHostKeyChecking=no",
         "-oConnectTimeout=10",
         f"root@{tda_ip}",
-        f"ls -lh {remote_path} 2>/dev/null || echo 'DIRECTORY_NOT_FOUND'"
+        f"ls -l {remote_path} 2>/dev/null || echo 'DIRECTORY_NOT_FOUND'"
     ]
 
     result = subprocess.run(
@@ -77,7 +77,7 @@ def check_captured_files(capture_dir, tda_ip="192.168.33.180", retries=4, retry_
                 print(f"\nCaptured files:")
                 print(f"{'-'*60}")
                 for filename, size in files:
-                    print(f"  {filename:50s} {size:>8s}")
+                    print(f"  {filename:50s} {size:>12s}")
                 print(f"{'-'*60}")
                 return True, file_count, files
 
