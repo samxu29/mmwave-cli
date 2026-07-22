@@ -149,83 +149,46 @@ import os
 import sys
 from datetime import datetime
 
-# PATCHED: idle time is fixed per-profile (not part of config_dict) to match
-# mimo.c/mmwcas.pyx's 3-profile geometry exactly - profile0=175us,
-# profile1/2=7us. Same value everywhere else (startFreq/slope/adcStart/
-# rampEnd/numAdcSamples/digOutSampleRate/rxGain) across all 3 profiles.
-IDLE_TIMES_US = [175, 7, 7]
 
-# PATCHED: only Dev4 (devId 3) transmits, one TX antenna per chirp
-# (TX0/TX1/TX2 on chirp0/1/2 respectively) - matches mimo.c's chripTxTable.
-# Dev1/Dev2/Dev3 are RX-only on every chirp.
-TX_DEVICE_ID = 3
+def _as_hex(value):
+    """Format an int (or already-hex str) as Studio-style '0x..' string."""
+    if isinstance(value, str):
+        return value if value.lower().startswith("0x") else f"0x{int(value, 0):X}"
+    return f"0x{int(value):X}"
 
 
 def export_config_to_json(config_dict, filename, num_devices=4):
     """
-    Create mmwave.json file from radar configuration dictionary.
-    This version matches the exact structure from mmWave Studio.
+    Create mmwave.json from config_dict (Studio-compatible structure).
 
-    PATCHED to reflect mimo.c's geometry: 3 chirps (not 12), single TX
-    device, 3 profiles with idle time 175us/7us/7us (not 1 profile).
-
-    Args:
-        config_dict: Dictionary containing MIMO configuration with profile, frame, and channel settings
-        filename: Output JSON filename
-        num_devices: Number of devices in cascade (default: 4)
+    All RF / chirp / frame / datapath fields are taken from config_dict so the
+    sidecar matches what was (or will be) programmed - no parallel hardcodes.
     """
-    #print(f"  > Creating JSON configuration file: {filename}")
-    
-    # Extract configuration from config_dict
-    profile = config_dict["mimo"]["profile"]
-    frame = config_dict["mimo"]["frame"]
-    channel = config_dict["mimo"]["channel"]
-    
-    # Profile values - map from config_dict keys to expected values
-    # (shared across all 3 profiles; idle time comes from IDLE_TIMES_US instead)
-    startFreq_GHz = profile["startFrequency"]
-    freqSlope_MHz_usec = profile["frequencySlope"]
-    adcStartTime_usec = profile["adcStartTime"]
-    rampEndTime_usec = profile["rampEndTime"]
-    txStartTime_usec = profile.get("txStartTime", 0)
-    numAdcSamples = profile["numAdcSamples"]
-    digOutSampleRate = profile["adcSamplingFrequency"]
-    hpfCornerFreq1 = profile["hpfCornerFreq1"]
-    hpfCornerFreq2 = profile["hpfCornerFreq2"]
-    rxGain = profile["rxGain"]
-    
-    # Frame values
-    numLoops = frame["numLoops"]
-    numFrames = frame["numFrames"]
-    framePeriodicity_msec = frame["framePeriodicity"]
-    
-    # Channel values
-    rxChannelEn = channel["rxChannelEn"]
-    txChannelEn = channel["txChannelEn"]
-    
-    # ADC and data format settings
-    adcBits = 2  # 16-bit ADC
-    adcOutFmt = 1  # Complex values
-    iqSwapSel = 0  # I first
-    chInterleave = 0  # Interleaved mode
-    
-    # Datapath settings
-    intfSel = 0  # CSI2 interface
-    transferFmtPkt0 = 1  # ADC data only
-    transferFmtPkt1 = 0  # Suppress packet 1
-    laneClkCfg = 1  # DDR Clock
-    dataRate_Mbps = 600
-    
-    # LDO and power settings
-    ldoBypassEnable = 3
-    ioSupplyIndicator = 0
-    supplyMonIrDrop = 0
-    lpAdcMode = 0
-    miscCtl = 1
-    
-    # CSI2 settings
-    lanePosPolSel = 0x35421
-    lineStartEndDis = 0
+    mimo = config_dict["mimo"]
+    profile = mimo["profile"]
+    frame = mimo["frame"]
+    channel = mimo["channel"]
+    chirp = mimo["chirp"]
+    rf_init = mimo["rfInit"]
+    adc_out = mimo["adcOut"]
+    low_power = mimo["lowPower"]
+    misc = mimo["misc"]
+    ldo = mimo["ldo"]
+    datapath = mimo["datapath"]
+
+    idle_times = profile["idleTimes"]
+    num_profiles = len(idle_times)
+    num_chirps = chirp["numChirps"]
+    profile_id_per_chirp = chirp["profileIdPerChirp"]
+    tx_antenna_table = chirp["txAntennaTable"]
+
+    if len(profile_id_per_chirp) != num_chirps:
+        raise ValueError("chirp.profileIdPerChirp length must equal chirp.numChirps")
+    if len(tx_antenna_table) < num_devices:
+        raise ValueError("chirp.txAntennaTable must have one row per device")
+    for row in tx_antenna_table[:num_devices]:
+        if len(row) != num_chirps:
+            raise ValueError("each chirp.txAntennaTable row must have numChirps entries")
 
     json_output = {
         "configGenerator": {
@@ -234,43 +197,15 @@ def export_config_to_json(config_dict, filename, num_devices=4):
             "isConfigIntermediate": 1
         },
         "currentVersion": {
-            "jsonCfgVersion": {
-                "major": 0,
-                "minor": 4,
-                "patch": 0
-            },
-            "DFPVersion": {
-                "major": 2,
-                "minor": 2,
-                "patch": 0
-            },
-            "SDKVersion": {
-                "major": 3,
-                "minor": 3,
-                "patch": 0
-            },
-            "mmwavelinkVersion": {
-                "major": 2,
-                "minor": 2,
-                "patch": 0
-            }
+            "jsonCfgVersion": {"major": 0, "minor": 4, "patch": 0},
+            "DFPVersion": {"major": 2, "minor": 2, "patch": 0},
+            "SDKVersion": {"major": 3, "minor": 3, "patch": 0},
+            "mmwavelinkVersion": {"major": 2, "minor": 2, "patch": 0}
         },
         "lastBackwardCompatibleVersion": {
-            "DFPVersion": {
-                "major": 2,
-                "minor": 1,
-                "patch": 0
-            },
-            "SDKVersion": {
-                "major": 3,
-                "minor": 0,
-                "patch": 0
-            },
-            "mmwavelinkVersion": {
-                "major": 2,
-                "minor": 1,
-                "patch": 0
-            }
+            "DFPVersion": {"major": 2, "minor": 1, "patch": 0},
+            "SDKVersion": {"major": 3, "minor": 0, "patch": 0},
+            "mmwavelinkVersion": {"major": 2, "minor": 1, "patch": 0}
         },
         "regulatoryRestrictions": {
             "frequencyRangeBegin_GHz": 77,
@@ -294,23 +229,26 @@ def export_config_to_json(config_dict, filename, num_devices=4):
     }
 
     for devId in range(num_devices):
-        # PATCHED: only TX_DEVICE_ID (Dev4) transmits - TX0 on chirp0, TX1 on
-        # chirp1, TX2 on chirp2. All other devices are RX-only on every chirp.
         chirps = []
-        for chirpIdx in range(3):
-            tx_enable = (1 << chirpIdx) if devId == TX_DEVICE_ID else 0
+        for chirpIdx in range(num_chirps):
+            tx_ant = tx_antenna_table[devId][chirpIdx]
+            tx_enable = (1 << int(tx_ant)) if tx_ant is not None and int(tx_ant) >= 0 else 0
             chirps.append({
                 "rlChirpCfg_t": {
                     "chirpStartIdx": chirpIdx,
                     "chirpEndIdx": chirpIdx,
-                    "profileId": chirpIdx,  # PATCHED: profile selected per chirp (0/1/2)
-                    "startFreqVar_MHz": 0.0,
-                    "freqSlopeVar_KHz_usec": 0.0,
-                    "idleTimeVar_usec": 0.0,
-                    "adcStartTimeVar_usec": 0.0,
-                    "txEnable": f"0x{tx_enable:X}"
+                    "profileId": profile_id_per_chirp[chirpIdx],
+                    "startFreqVar_MHz": float(chirp["startFreqVar_MHz"]),
+                    "freqSlopeVar_KHz_usec": float(chirp["freqSlopeVar_KHz_usec"]),
+                    "idleTimeVar_usec": float(chirp["idleTimeVar_usec"]),
+                    "adcStartTimeVar_usec": float(chirp["adcStartTimeVar_usec"]),
+                    "txEnable": _as_hex(tx_enable)
                 }
             })
+
+        trigger_select = (
+            frame["triggerSelectMaster"] if devId == 0 else frame["triggerSelectSlave"]
+        )
 
         device_config = {
             "mmWaveDeviceId": devId,
@@ -319,66 +257,64 @@ def export_config_to_json(config_dict, filename, num_devices=4):
                 "MIMOScheme": "TDM",
                 "rlCalibrationDataFile": "",
                 "rlChanCfg_t": {
-                    "rxChannelEn": f"0x{rxChannelEn:X}",
-                    "txChannelEn": f"0x{txChannelEn:X}",
+                    "rxChannelEn": _as_hex(channel["rxChannelEn"]),
+                    "txChannelEn": _as_hex(channel["txChannelEn"]),
                     "cascading": 1 if devId == 0 else 2,
                     "cascadingPinoutCfg": "0x0"
                 },
                 "rlAdcOutCfg_t": {
                     "fmt": {
-                        "b2AdcBits": adcBits,
-                        "b8FullScaleReducFctr": 0,
-                        "b2AdcOutFmt": adcOutFmt
+                        "b2AdcBits": adc_out["adcBits"],
+                        "b8FullScaleReducFctr": adc_out["fullScaleReducFctr"],
+                        "b2AdcOutFmt": adc_out["adcOutFmt"]
                     }
                 },
                 "rlLowPowerModeCfg_t": {
-                    "lpAdcMode": lpAdcMode
+                    "lpAdcMode": low_power["lpAdcMode"]
                 },
-                # PATCHED: 3 profiles instead of 1 - idle time differs per
-                # profile (175us/7us/7us), all other fields shared.
                 "rlProfiles": [{
                     "rlProfileCfg_t": {
                         "profileId": pIdx,
-                        "pfVcoSelect": "0x0",
-                        "pfCalLutUpdate": "0x0",
-                        "startFreqConst_GHz": startFreq_GHz,
-                        "idleTimeConst_usec": IDLE_TIMES_US[pIdx],
-                        "adcStartTimeConst_usec": adcStartTime_usec,
-                        "rampEndTime_usec": rampEndTime_usec,
-                        "txOutPowerBackoffCode": "0x0",
-                        "txPhaseShifter": "0x0",
-                        "freqSlopeConst_MHz_usec": freqSlope_MHz_usec,
-                        "txStartTime_usec": txStartTime_usec,
-                        "numAdcSamples": numAdcSamples,
-                        "digOutSampleRate": float(digOutSampleRate),
-                        "hpfCornerFreq1": hpfCornerFreq1,
-                        "hpfCornerFreq2": hpfCornerFreq2,
-                        "rxGain_dB": f"0x{rxGain:X}"
+                        "pfVcoSelect": _as_hex(profile["pfVcoSelect"]),
+                        "pfCalLutUpdate": _as_hex(profile["pfCalLutUpdate"]),
+                        "startFreqConst_GHz": profile["startFrequency"],
+                        "idleTimeConst_usec": idle_times[pIdx],
+                        "adcStartTimeConst_usec": profile["adcStartTime"],
+                        "rampEndTime_usec": profile["rampEndTime"],
+                        "txOutPowerBackoffCode": _as_hex(profile["txOutPowerBackoffCode"]),
+                        "txPhaseShifter": _as_hex(profile["txPhaseShifter"]),
+                        "freqSlopeConst_MHz_usec": profile["frequencySlope"],
+                        "txStartTime_usec": profile["txStartTime"],
+                        "numAdcSamples": profile["numAdcSamples"],
+                        "digOutSampleRate": float(profile["adcSamplingFrequency"]),
+                        "hpfCornerFreq1": profile["hpfCornerFreq1"],
+                        "hpfCornerFreq2": profile["hpfCornerFreq2"],
+                        "rxGain_dB": _as_hex(profile["rxGain"])
                     }
-                } for pIdx in range(3)],
+                } for pIdx in range(num_profiles)],
                 "rlChirps": chirps,
                 "rlRfInitCalConf_t": {
-                    "calibEnMask": "0x1FF0"
+                    "calibEnMask": _as_hex(rf_init["calibEnMask"])
                 },
                 "rlFrameCfg_t": {
-                    "chirpEndIdx": 2,   # PATCHED: was 11 (12-chirp scheme), now 3 chirps
-                    "chirpStartIdx": 0,
-                    "numLoops": numLoops,
-                    "numFrames": numFrames,
-                    "framePeriodicity_msec": float(framePeriodicity_msec),
-                    "triggerSelect": 1 if devId == 0 else 2,
-                    "frameTriggerDelay": 0.0
+                    "chirpEndIdx": frame["chirpEndIdx"],
+                    "chirpStartIdx": frame["chirpStartIdx"],
+                    "numLoops": frame["numLoops"],
+                    "numFrames": frame["numFrames"],
+                    "framePeriodicity_msec": float(frame["framePeriodicity"]),
+                    "triggerSelect": trigger_select,
+                    "frameTriggerDelay": float(frame["frameTriggerDelay"])
                 },
                 "rlBpmChirps": [],
                 "rlRfMiscConf_t": {
-                    "miscCtl": f"{miscCtl}"
+                    "miscCtl": str(misc["miscCtl"])
                 },
                 "rlRfPhaseShiftCfgs": [],
                 "rlRfProgFiltConfs": [],
                 "rlRfLdoBypassCfg_t": {
-                    "ldoBypassEnable": ldoBypassEnable,
-                    "supplyMonIrDrop": supplyMonIrDrop,
-                    "ioSupplyIndicator": ioSupplyIndicator
+                    "ldoBypassEnable": ldo["ldoBypassEnable"],
+                    "supplyMonIrDrop": ldo["supplyMonIrDrop"],
+                    "ioSupplyIndicator": ldo["ioSupplyIndicator"]
                 },
                 "rlLoopbackBursts": [],
                 "rlDynChirpCfgs": [],
@@ -386,32 +322,31 @@ def export_config_to_json(config_dict, filename, num_devices=4):
             },
             "rawDataCaptureConfig": {
                 "rlDevDataFmtCfg_t": {
-                    "iqSwapSel": iqSwapSel,
-                    "chInterleave": chInterleave
+                    "iqSwapSel": datapath["iqSwapSel"],
+                    "chInterleave": datapath["chInterleave"]
                 },
                 "rlDevDataPathCfg_t": {
-                    "intfSel": intfSel,
-                    "transferFmtPkt0": f"0x{transferFmtPkt0:X}",
-                    "transferFmtPkt1": f"0x{transferFmtPkt1:X}",
-                    "cqConfig": 0,
-                    "cq0TransSize": 0,
-                    "cq1TransSize": 0,
-                    "cq2TransSize": 0
+                    "intfSel": datapath["intfSel"],
+                    "transferFmtPkt0": _as_hex(datapath["transferFmtPkt0"]),
+                    "transferFmtPkt1": _as_hex(datapath["transferFmtPkt1"]),
+                    "cqConfig": datapath["cqConfig"],
+                    "cq0TransSize": datapath["cq0TransSize"],
+                    "cq1TransSize": datapath["cq1TransSize"],
+                    "cq2TransSize": datapath["cq2TransSize"]
                 },
                 "rlDevDataPathClkCfg_t": {
-                    "laneClkCfg": laneClkCfg,
-                    "dataRate_Mbps": dataRate_Mbps
+                    "laneClkCfg": datapath["laneClkCfg"],
+                    "dataRate_Mbps": datapath["dataRate_Mbps"]
                 },
                 "rlDevCsi2Cfg_t": {
-                    "lanePosPolSel": f"0x{lanePosPolSel:X}",
-                    "lineStartEndDis": lineStartEndDis
+                    "lanePosPolSel": _as_hex(datapath["lanePosPolSel"]),
+                    "lineStartEndDis": datapath["lineStartEndDis"]
                 }
             },
             "monitoringConfig": {}
         }
         json_output["mmWaveDevices"].append(device_config)
 
-    # Add processing chain config
     json_output["processingChainConfig"] = {
         "detectionChain": {
             "name": "TI_GenericChain",

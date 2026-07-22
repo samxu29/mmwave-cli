@@ -738,11 +738,9 @@ cpdef mmw_set_config(dict configdict):
     if "mimo" in configdict:
         mimo = configdict["mimo"]
         if "profile" in mimo: # [PROFILE CONFIGURATION]
-            # NOTE: idle time is intentionally NOT configurable here - it's
-            # fixed per-profile (175us/7us/7us) to match mimo.c's PATCHED
-            # 3-profile geometry. All other fields below are applied
-            # identically to all 3 profile slots (SAME across all 3, like
-            # mimo.c's profileCfgArgs0/1/2).
+            # Shared RF fields applied to all profile slots; idleTimes /
+            # pfVcoSelect / pfCalLutUpdate come from config_dict (same source
+            # as the .mmwave.json sidecar) when present.
             profile = mimo["profile"]
             for pIdx in range(3):
                 if "startFrequency" in profile: # Chirp start frequency in GHz
@@ -765,7 +763,16 @@ cpdef mmw_set_config(dict configdict):
                     config.profileCfg[pIdx].hpfCornerFreq1 = <uint8_t>(profile["hpfCornerFreq1"])
                 if "hpfCornerFreq2" in profile: # hpfCornerFreq2
                     config.profileCfg[pIdx].hpfCornerFreq2 = <uint8_t>(profile["hpfCornerFreq2"])
-            
+                if "pfVcoSelect" in profile:
+                    config.profileCfg[pIdx].pfVcoSelect = <uint8_t>(profile["pfVcoSelect"])
+                if "pfCalLutUpdate" in profile:
+                    config.profileCfg[pIdx].pfCalLutUpdate = <uint8_t>(profile["pfCalLutUpdate"])
+            if "idleTimes" in profile:
+                idle_times = profile["idleTimes"]
+                for pIdx in range(min(3, len(idle_times))):
+                    # 1 LSB = 10ns -> value = us * 100
+                    config.profileCfg[pIdx].idleTimeConst = <uint32_t>(ceil(idle_times[pIdx] * 1e2))
+
         if "frame" in mimo: # [FRAME CONFIGURATION]
             frame = mimo["frame"]
             if "numFrames" in frame: # Number of frames to record
@@ -774,6 +781,13 @@ cpdef mmw_set_config(dict configdict):
                 config.frameCfg.numLoops = <uint16_t>(frame["numLoops"])
             if "framePeriodicity" in frame: # Frame periodicity in ms
                 config.frameCfg.framePeriodicity = <uint32_t>(ceil(frame["framePeriodicity"]*2e5)) # 1LSB = 5ns
+            if "chirpStartIdx" in frame:
+                config.frameCfg.chirpStartIdx = <uint16_t>(frame["chirpStartIdx"])
+            if "chirpEndIdx" in frame:
+                config.frameCfg.chirpEndIdx = <uint16_t>(frame["chirpEndIdx"])
+            if "frameTriggerDelay" in frame:
+                # Studio JSON uses usec float; SDK frameTriggerDelay is in 5ns LSB
+                config.frameCfg.frameTriggerDelay = <uint32_t>(ceil(float(frame["frameTriggerDelay"]) * 2e5))
         if "channel" in mimo:# [CHANNEL CONFIGURATION]
             channel = mimo["channel"]
             if "rxChannelEn" in channel: # RX Channel configuration

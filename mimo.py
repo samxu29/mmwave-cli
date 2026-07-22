@@ -7,8 +7,8 @@ via mmwcas.pyx, and are kept in lockstep with
 Cascade_Configuration_Capture_Ready2ArmTrigger.lua:
   - 3 chirps, single TX device (TX0/TX1/TX2 on chirp0/1/2), not the original
     12-chirp/4-device MIMO scheme.
-  - 3 profiles with idle time 175us/7us/7us (fixed - not configurable via
-    config_dict below, see NOTE on "idleTime").
+  - 3 profiles with idle time 175us/7us/7us, pfVcoSelect=0x02 (VCO2), and
+    chirp TX geometry live in config_dict below (also written to .mmwave.json).
   - 60 MHz/us slope, 65us ramp-end, 255 loops/frame, 100ms frame periodicity
     (10 Hz frame rate).
 
@@ -55,15 +55,18 @@ try:
 except ImportError:
     _HAS_GPIO = False
 
+# Single source of truth for RF/geometry programmed by mmwcas AND written into
+# the per-capture .mmwave.json sidecar. Do not hardcode parallel copies in the
+# JSON exporter - change values here (and rebuild mmwcas if Cython defaults
+# also need updating for fields not yet applied from this dict).
 config_dict = {
     "mimo": {
         "profile": {
             "id": 0,
             "startFrequency": 77,           # Chirp start frequency in GHz
             "frequencySlope": 60,           # Frequency slope in MHz/us (mimo.c PATCHED value)
-            # NOTE: idle time is NOT configurable here - it's fixed per-profile
-            # (175us/7us/7us) inside mmwcas.pyx to match mimo.c's PATCHED
-            # 3-profile geometry exactly (idle time differs per chirp).
+            # Per-profile idle times (us) - profile0/1/2 for chirp0/1/2
+            "idleTimes": [175, 7, 7],
             "adcStartTime": 6,              # ADC start time in us
             "numAdcSamples": 256,           # Number of ADC samples per chirp
             "adcSamplingFrequency": 8000,   # ADC sampling frequency in ksps
@@ -72,16 +75,76 @@ config_dict = {
             "txStartTime": 0,               # TX starttime in us
             "hpfCornerFreq1": 0,            # 0: 175kHz
             "hpfCornerFreq2": 0,            # 0: 350kHz
+            # AWR2243: 0x02 = VCO2 (77-81 GHz) - matches mmwcas/mimo.c pfVcoSelect
+            "pfVcoSelect": 0x02,
+            "pfCalLutUpdate": 0x00,
+            "txOutPowerBackoffCode": 0x00,
+            "txPhaseShifter": 0x00,
         },
         "frame": {
             "numLoops": 255,                # mimo.c PATCHED value (was 16)
             "numFrames": 0,                 # Number of frames to record (0 = infinite)
             "framePeriodicity": 100,        # ms - mimo.c PATCHED value (was 50; 10Hz frame rate)
+            "chirpStartIdx": 0,
+            "chirpEndIdx": 2,               # 3 chirps (0-2)
+            "frameTriggerDelay": 0.0,
+            "triggerSelectMaster": 1,       # software trigger
+            "triggerSelectSlave": 2,        # hardware sync from master
         },
         "channel": {
             "rxChannelEn": 0x0F,            # Enable all 4 RX channels
             "txChannelEn": 0x07,            # Enable all 3 TX channels
-        }
+        },
+        # Chirp geometry: per-device local TX antenna index per chirp (-1 = TX off).
+        # Matches mmwcas/mimo.c chripTxTable - only Dev4 (index 3) transmits.
+        "chirp": {
+            "numChirps": 3,
+            "profileIdPerChirp": [0, 1, 2],
+            "txAntennaTable": [
+                [-1, -1, -1],               # Dev1 master: RX only
+                [-1, -1, -1],               # Dev2 slave1: RX only
+                [-1, -1, -1],               # Dev3 slave2: RX only
+                [0, 1, 2],                  # Dev4 slave3: TX0/TX1/TX2 on chirp0/1/2
+            ],
+            "startFreqVar_MHz": 0.0,
+            "freqSlopeVar_KHz_usec": 0.0,
+            "idleTimeVar_usec": 0.0,
+            "adcStartTimeVar_usec": 0.0,
+        },
+        "rfInit": {
+            "calibEnMask": 0x1FF0,          # matches MMWL_rfInit / Studio boot cals
+        },
+        "adcOut": {
+            "adcBits": 2,                   # 16-bit
+            "fullScaleReducFctr": 0,
+            "adcOutFmt": 1,                 # complex
+        },
+        "lowPower": {
+            "lpAdcMode": 0,
+        },
+        "misc": {
+            "miscCtl": 1,                   # per-chirp phase shifter enable
+        },
+        "ldo": {
+            "ldoBypassEnable": 3,
+            "supplyMonIrDrop": 0,
+            "ioSupplyIndicator": 0,
+        },
+        "datapath": {
+            "iqSwapSel": 0,
+            "chInterleave": 0,
+            "intfSel": 0,                   # CSI2
+            "transferFmtPkt0": 1,
+            "transferFmtPkt1": 0,
+            "cqConfig": 0,
+            "cq0TransSize": 0,
+            "cq1TransSize": 0,
+            "cq2TransSize": 0,
+            "laneClkCfg": 1,
+            "dataRate_Mbps": 600,
+            "lanePosPolSel": 0x35421,
+            "lineStartEndDis": 0,
+        },
     }
 }
 
