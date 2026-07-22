@@ -24,9 +24,9 @@
 # 3 idleTimes entries (mmwcas.pyx profileCfg[3] slots); slots 1/2 are
 # unused placeholders because every chirp maps to profile 0.
 #
-# NOTE: numFrames=10 matches the Lua script (finite capture). For
-# duration-controlled pipeline runs prefer numFrames=0 (infinite framing,
-# stopped by mimo.py's --duration), same convention as cascade_tx3_rx16.toml.
+# NOTE: numFrames in this file is a fallback only. mimo.py / pipeline.py
+# override it with --frames (preferred) so capture length matches the
+# radar+TDA frame counter, not wall-clock sleep.
 
 [mimo.profile]
 id = 0

@@ -5,8 +5,8 @@ Continuously: capture → transfer data from TDA → edge processing → repeat
 
 Usage:
     python3 pipeline.py
-    python3 pipeline.py --duration 10 --interval 5
-    python3 pipeline.py --duration 60 --tda-ip 192.168.33.180
+    python3 pipeline.py --frames 100 --interval 5
+    python3 pipeline.py --frames 300 --tda-ip 192.168.33.180
 
 Press Ctrl+C to stop gracefully after the current cycle completes.
 """
@@ -82,13 +82,14 @@ def _step_done(name: str, t_start: float) -> float:
 # Step 1 — Capture
 # ─────────────────────────────────────────────
 
-def run_capture(duration: float, tda_ip: str, label: str, radar_config: str = 'cascade_tx3_rx16') -> str | None:
+def run_capture(num_frames: int, tda_ip: str, label: str,
+                radar_config: str = 'cascade_tx3_rx16') -> str | None:
     """
     Execute one capture cycle via mimo.py.
     Returns the capture directory name (e.g. 'RPI_python_sine_2hz_1mm_10s_20260510_144105'),
     or None on failure.
     """
-    _banner(f'STEP 1 — Radar Capture  ({duration}s)')
+    _banner(f'STEP 1 — Radar Capture  ({num_frames} frames)')
 
     # Remember existing JSON files so we can detect the new one afterwards.
     before = set(glob.glob(os.path.join(JSON_FILES_DIR, '*.mmwave.json')))
@@ -96,7 +97,7 @@ def run_capture(duration: float, tda_ip: str, label: str, radar_config: str = 'c
     cmd = [
         sys.executable,
         os.path.join(SCRIPT_DIR, 'mimo.py'),
-        '--duration', str(duration),
+        '--frames', str(num_frames),
         '--tda-ip',   tda_ip,
         '--num-loops', '1',
         '--directory', label,
@@ -318,8 +319,9 @@ def main():
         description='Automated MIMO Radar Capture & Processing Pipeline',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument('-t', '--duration',  type=float, default=10.0,
-                        help='Radar capture duration in seconds')
+    parser.add_argument('--frames', type=int, default=100,
+                        help='Radar frames to capture (passed to mimo.py --frames). '
+                             'At 100 ms period: 100≈10s, 300≈30s.')
     parser.add_argument('--label',           type=str,   default='RPI_python',
                         help='Experiment label used as capture directory prefix '
                              '(e.g. RPI_python_sine_2hz_1mm_10s). '
@@ -355,16 +357,22 @@ def main():
                         help='LoRaWAN APPKEY (32 hex chars)')
     args = parser.parse_args()
 
+    if args.frames < 1:
+        print('Error: --frames must be >= 1')
+        sys.exit(1)
+
     # PS map lives alongside mimo_processing.py in IoSAR-EdgeProcessing/
     ps_map_file = os.path.join(EDGE_DIR, 'ps_map.json')
     if args.reset_ps and args.ps_file is None and os.path.isfile(ps_map_file):
         os.remove(ps_map_file)
         print(f'[PIPELINE] Deleted PS map: {ps_map_file}')
 
+    capture_len = f'{args.frames} frames'
+
     print('╔══════════════════════════════════════════════════════════╗')
     print('║        AUTOMATED MIMO RADAR PIPELINE — IMRSL            ║')
     print('╚══════════════════════════════════════════════════════════╝')
-    print(f'  Capture duration : {args.duration}s')
+    print(f'  Capture length   : {capture_len}')
     print(f'  Capture label    : {args.label}')
     print(f'  TDA IP address   : {args.tda_ip}')
     print(f'  Cycle interval   : {args.interval}s')
@@ -388,8 +396,8 @@ def main():
         print(f'{"#"*60}')
 
         # ── 1. Capture ──────────────────────────────────────────────
-        t1 = _step_start(f'Step 1 — Capture ({args.duration}s)')
-        capture_dir = run_capture(args.duration, args.tda_ip, args.label, args.radar_config)
+        t1 = _step_start(f'Step 1 — Capture ({capture_len})')
+        capture_dir = run_capture(args.frames, args.tda_ip, args.label, args.radar_config)
         if capture_dir is None:
             print('[PIPELINE] Capture failed — retrying in 10s...')
             time.sleep(10)

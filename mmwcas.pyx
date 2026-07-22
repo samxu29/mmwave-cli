@@ -808,10 +808,13 @@ cpdef int mmw_init(
     configure(config) 
     return status
 
-cpdef int mmw_arming_tda(str capture_path):
+cpdef int mmw_arming_tda(str capture_path, int num_frames=-1):
     """@brief Prepare the TDA board and notify TDA about the start of recording
-    * @capture_path capture path setup to arm the TDA for recording 
-    * @return int 
+    * @capture_path capture path setup to arm the TDA for recording
+    * @num_frames frames for TDA to record (-1 = use config.frameCfg.numFrames;
+    *             0 = unlimited until stop). Used by interactive mode so each
+    *             capture can request a different length without reconfiguring RF.
+    * @return int
     """
     cdef int status = 0
     cdef char capture_path_buf[256]
@@ -828,7 +831,10 @@ cpdef int mmw_arming_tda(str capture_path):
     tdaCfg.captureDirectory = <unsigned char*>capture_path_buf
     tdaCfg.framePeriodicity = frame_period_ms
     tdaCfg.numberOfFilesToAllocate = 0
-    tdaCfg.numberOfFramesToCapture = 0  # config.frameCfg.numFrames
+    if num_frames < 0:
+        tdaCfg.numberOfFramesToCapture = config.frameCfg.numFrames
+    else:
+        tdaCfg.numberOfFramesToCapture = <unsigned int>num_frames
     tdaCfg.dataPacking = 0              # 0: 16-bit | 1: 12-bit
 
     status = MMWL_ArmingTDA(tdaCfg)

@@ -7,12 +7,19 @@ frame timing) has moved OUT of this file and into radar_config.py
 idle-time scheme or antenna geometry preset without editing this file. Select
 a non-default preset with --radar-config <name>.
 
+Capture length is defined by FRAME COUNT (--frames), not wall-clock seconds.
+The radar + TDA are programmed with that numFrames so they stop after exactly
+N frames (e.g. 300 frames @ 100 ms period ≈ 30 s). Host sleep is only
+N × framePeriodicity + a small margin so we do not stop_frame early.
+
 Two capture modes, both configure the radar ONCE then loop:
   - Default: automatic loop, driven by --num-loops/--inter-loop-time (used by
     pipeline.py).
   - --interactive: REPL loop mirroring mimo.c's --interactive - type an
-    experiment name (+ optional seconds) at the `experiment>` prompt to arm
-    + record; blank/quit/exit to stop. No reconfiguration between captures.
+    experiment name (+ optional frame count) at the `experiment>` prompt to
+    arm + record; blank/quit/exit to stop. RF is configured with numFrames=0
+    (infinite); each prompt's frame count is applied to TDA arming so captures
+    can have different lengths without reconfiguring the chips.
 
 IR sensor timestamp logging (replaces the old run_experiment.sh + ir_logger.py
 signal-based glue) is now built in: GPIO edge detection is armed once at
@@ -33,6 +40,7 @@ automatically - no separate correlation step needed downstream.
 """
 import time
 import argparse
+import copy
 from datetime import datetime
 import sys
 import mmwcas
@@ -44,6 +52,16 @@ from utility import signal_handler
 from utility import upload_files_to_tda
 from radar_config import RADAR_CONFIGS, DEFAULT_RADAR_CONFIG, get_radar_config
 import os
+
+
+def _frame_period_s(cfg):
+    """Frame period in seconds from a radar config dict (periodicity is ms)."""
+    return float(cfg["mimo"]["frame"]["framePeriodicity"]) / 1000.0
+
+
+def _wait_s_for_frames(num_frames, period_s):
+    """Host wait after start_frame: N periods + one period margin for TDA flush."""
+    return num_frames * period_s + period_s
 
 try:
     import RPi.GPIO as GPIO
@@ -118,7 +136,7 @@ def save_ir_timestamps(capture_dir):
     return path
 
 
-def run_one_capture(exp_label, duration_s, tda_ip):
+def run_one_capture(exp_label, num_frames, tda_ip):
     """
     Arm the TDA, record one capture, de-arm, then verify + export the
     .mmwave.json sidecar. Does NOT touch the RF chip configuration (profiles/
@@ -126,22 +144,36 @@ def run_one_capture(exp_label, duration_s, tda_ip):
     same division of responsibility as mimo.c's run_capture(). Safe to call
     repeatedly after a single mmw_set_config()/mmw_init() (see --interactive).
 
+    Capture length is num_frames: passed to TDA numberOfFramesToCapture on arm,
+    and the host waits num_frames × framePeriodicity + one period margin.
+    (In non-interactive mode the RF chips are also programmed with that
+    numFrames at configure time.)
+
     Returns (status, capture_dir) - status is 0 on full success.
     """
+    global config_dict
     timestamp = datetime.now().strftime("%y%m%d_%H%M%S")
     capture_dir = f"{exp_label}_{timestamp}"
+    period_s = _frame_period_s(config_dict)
+    wait_s = _wait_s_for_frames(num_frames, period_s)
+    approx_s = num_frames * period_s
 
-    print(f"\n>>> Capturing '{capture_dir}' for {duration_s}s ...")
+    # So .mmwave.json matches this capture even when interactive overrides
+    # the default --frames (RF may still be infinite / numFrames=0).
+    config_dict["mimo"]["frame"]["numFrames"] = num_frames
 
-    status = mmwcas.mmw_arming_tda(capture_dir)
+    print(f"\n>>> Capturing '{capture_dir}' — {num_frames} frames "
+          f"(~{approx_s:.1f}s @ {period_s*1000:.0f} ms/frame) ...")
+
+    status = mmwcas.mmw_arming_tda(capture_dir, num_frames)
     if status != 0:
         print(f"mmw_arming_tda failed (status: {status})")
         return status, capture_dir
     time.sleep(2)
 
     # IR recording is only ever "on" for the TDA framing window below - armed
-    # right before mmw_start_frame(), disarmed the instant the duration sleep
-    # ends (before mmw_stop_frame()/de-arm/transfer, which are unrelated to
+    # right before mmw_start_frame(), disarmed when the frame wait ends
+    # (before mmw_stop_frame()/de-arm/transfer, which are unrelated to
     # framing and shouldn't pick up stray edges).
     global ir_recording
     if ir_enabled:
@@ -153,8 +185,8 @@ def run_one_capture(exp_label, duration_s, tda_ip):
         print(f"mmw_start_frame failed (status: {status})")
         return status, capture_dir
 
-    print(f"\n Capturing... ({duration_s}s)")
-    time.sleep(duration_s)
+    print(f"\n Capturing... ({num_frames} frames, waiting {wait_s:.2f}s)")
+    time.sleep(wait_s)
     ir_recording = False
     ir_npy_path = save_ir_timestamps(capture_dir)
 
@@ -197,14 +229,17 @@ def run_one_capture(exp_label, duration_s, tda_ip):
 def run_interactive(args):
     """
     REPL loop mirroring mimo.c's --interactive mode: configure once (already
-    done by the caller), then repeatedly prompt for an experiment name and
-    record - no reconfiguration between captures.
+    done by the caller with RF numFrames=0), then repeatedly prompt for an
+    experiment name and optional frame count. Each capture arms the TDA with
+    that frame count — no RF reconfiguration between captures.
     """
+    period_ms = float(config_dict["mimo"]["frame"]["framePeriodicity"])
     print("\n=== Interactive multi-capture mode ===")
     print("Radar is configured and the connection to the TDA is live.")
     print("At the prompt, type an experiment name to arm + record, e.g.:")
-    print(f"  bridge_test          (uses --duration value: {args.duration:.2f}s)")
-    print("  bridge_test 30       (30 seconds instead)")
+    print(f"  bridge_test          (uses --frames default: {args.frames})")
+    print(f"  bridge_test 300      (300 frames for this capture only)")
+    print(f"Frame period: {period_ms:.0f} ms  ({1000.0/period_ms:.1f} fps)")
     print("Type 'quit'/'exit' or leave blank to stop.\n")
 
     while True:
@@ -221,11 +256,15 @@ def run_interactive(args):
         parts = line.split()
         exp_name = parts[0]
         try:
-            duration_s = float(parts[1]) if len(parts) >= 2 else args.duration
+            num_frames = int(parts[1]) if len(parts) >= 2 else args.frames
         except ValueError:
-            duration_s = args.duration
+            print(f"Could not parse frame count; using default {args.frames}.")
+            num_frames = args.frames
+        if num_frames < 1:
+            print("Frame count must be >= 1; using configured --frames.")
+            num_frames = args.frames
 
-        status, capture_dir = run_one_capture(exp_name, duration_s, args.tda_ip)
+        status, capture_dir = run_one_capture(exp_name, num_frames, args.tda_ip)
         if status == 0:
             print(f">>> Capture '{capture_dir}' completed successfully.\n")
         else:
@@ -241,10 +280,12 @@ def main():
                         type=str,
                         default='mmwave_python',
                         help='Base directory name for data capture (default: mmwave_python)')
-    parser.add_argument('-t', '--duration',
-                        type=float,
-                        default=10.0,
-                        help='Recording duration in seconds (default: 10.0)')
+    parser.add_argument('--frames',
+                        type=int,
+                        default=100,
+                        help='Number of radar frames to capture (programs frame.numFrames + '
+                             'TDA numberOfFramesToCapture). Default: 100. At 100 ms period, '
+                             '100 frames ≈ 10 s, 300 frames ≈ 30 s.')
     parser.add_argument('--tda-ip',
                         type=str,
                         default='192.168.33.180',
@@ -261,7 +302,7 @@ def main():
                         action='store_true',
                         help="Configure once, then repeatedly prompt for an experiment name and "
                              "record - no reconfiguration between captures. At the prompt, type "
-                             "'<name>' or '<name> <seconds>' to capture, or 'quit'/blank to exit.")
+                             "'<name>' or '<name> <frames>' to capture, or 'quit'/blank to exit.")
     parser.add_argument('--no-ir',
                         action='store_true',
                         help='Disable IR sensor timestamp logging entirely (default: enabled if '
@@ -291,8 +332,28 @@ def main():
     if args.num_loops < 0:
         print("Error: --num-loops must be >= 0")
         sys.exit(1)
+    if args.frames < 1:
+        print("Error: --frames must be >= 1")
+        sys.exit(1)
 
-    print(f"Capture duration: {args.duration} seconds")
+    # Select the RF/geometry preset (see radar_config.py) for this run.
+    # deepcopy so CLI --frames can override TOML numFrames without mutating cache.
+    global config_dict
+    config_dict = copy.deepcopy(get_radar_config(args.radar_config))
+    period_ms = float(config_dict["mimo"]["frame"]["framePeriodicity"])
+    period_s = period_ms / 1000.0
+
+    # Interactive: RF chips stay at numFrames=0 (infinite) so each prompt can
+    # request a different length via TDA arming. Non-interactive: program the
+    # chips with the exact frame count as well.
+    if args.interactive:
+        config_dict["mimo"]["frame"]["numFrames"] = 0
+    else:
+        config_dict["mimo"]["frame"]["numFrames"] = args.frames
+    approx_s = args.frames * period_s
+
+    print(f"Capture frames   : {args.frames}  (~{approx_s:.1f}s @ {period_ms:.0f} ms/frame)"
+          + ("  [interactive default; override per prompt]" if args.interactive else ""))
     if args.interactive:
         print("Mode: interactive (configure once, loop on typed experiment names)")
     else:
@@ -300,9 +361,6 @@ def main():
         if args.num_loops != 1:
             print(f"Inter-loop delay : {args.inter_loop_time} seconds")
 
-    # Select the RF/geometry preset (see radar_config.py) for this run.
-    global config_dict
-    config_dict = get_radar_config(args.radar_config)
     print(f"Radar config     : {args.radar_config}")
 
     # Configure radar
@@ -352,10 +410,10 @@ def main():
             print("\n" + "="*60)
             print(f"CAPTURE LOOP {loop_count}" + (" (INFINITE MODE)" if infinite_mode else f" of {args.num_loops}"))
             print("="*60)
-            print(f"Recording duration: {args.duration} seconds")
+            print(f"Recording frames: {args.frames}  (~{args.frames * period_s:.1f}s)")
             print("="*60)
 
-            status, capture_dir = run_one_capture(args.directory, args.duration, args.tda_ip)
+            status, capture_dir = run_one_capture(args.directory, args.frames, args.tda_ip)
             if status != 0:
                 time.sleep(1)
                 continue  # Skip to next loop

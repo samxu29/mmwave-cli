@@ -167,7 +167,8 @@ make build
 
 1. Loads a preset from `radar_configs/<name>.toml`
 2. Calls `mmwcas.mmw_set_config()` then `mmw_init()`
-3. Arms TDA → starts frames → sleeps `--duration` seconds → stops
+3. Arms TDA → starts frames → waits N × framePeriodicity (+ 1 period) → stops
+   (`--frames` programs radar `numFrames` + TDA `numberOfFramesToCapture`)
 4. Writes `mmwave_json_files/<capture>.mmwave.json` and optionally IR timestamps
 5. Uploads those sidecars into `/mnt/ssd/<capture_dir>/` next to the raw `.bin`s
 
@@ -176,20 +177,22 @@ It does **not** run edge processing or LoRa.
 ### Typical usage (raw IF only)
 
 ```bash
-# 10 s capture, default radar preset (cascade_tx3_rx16)
-python3 mimo.py --duration 10 --directory my_capture
+# 100 frames (~10 s @ 100 ms), default radar preset (cascade_tx3_rx16)
+python3 mimo.py --frames 100 --directory my_capture
 
-# Explicit preset
-python3 mimo.py --duration 10 --directory my_capture --radar-config cascade_tx3_rx16
+# 300 frames ≈ 30 s at 10 fps
+python3 mimo.py --frames 300 --directory my_capture --radar-config cascade_tx3_rx16
 
 # TI full 12-chirp MIMO (from Cascade_Configuration_MIMO.lua)
-python3 mimo.py --duration 10 --directory my_capture --radar-config cascade_mimo
+python3 mimo.py --frames 100 --directory my_capture --radar-config cascade_mimo
 
-# Interactive naming (configure once, then type names at the prompt)
-python3 mimo.py --interactive --duration 10
+# Interactive naming (configure once; optional frames per prompt)
+python3 mimo.py --interactive --frames 100
+# experiment> bridge_test
+# experiment> bridge_test 300
 
 # Disable IR GPIO timestamps
-python3 mimo.py --duration 10 --no-ir
+python3 mimo.py --frames 100 --no-ir
 ```
 
 ### CLI options (`mimo.py`)
@@ -197,7 +200,7 @@ python3 mimo.py --duration 10 --no-ir
 | Option | Default | Description |
 |--------|---------|-------------|
 | `-d` / `--directory` | `mmwave_python` | Capture name prefix (timestamp appended) |
-| `-t` / `--duration` | `10` | Capture length in **seconds** |
+| `--frames` | `100` | Capture length in **radar frames** (exact) |
 | `--tda-ip` | `192.168.33.180` | TDA IP |
 | `-n` / `--num-loops` | `1` | Loops (`0` = until Ctrl+C) |
 | `-i` / `--inter-loop-time` | `60` | Delay between loops (s) |
@@ -224,7 +227,7 @@ Preset name = filename without `.toml`:
 ```bash
 cp radar_configs/cascade_tx3_rx16.toml radar_configs/my_setup.toml
 # edit my_setup.toml
-python3 mimo.py --radar-config my_setup --duration 10
+python3 mimo.py --radar-config my_setup --frames 100
 ```
 
 No Python edits required — files in `radar_configs/` are loaded automatically.
@@ -245,7 +248,7 @@ rxGain = 48
 
 [mimo.frame]
 numLoops = 255
-numFrames = 0                  # 0 = infinite (stop via --duration)
+numFrames = 0                  # overridden by mimo.py --frames
 framePeriodicity = 100
 chirpStartIdx = 0
 chirpEndIdx = 2
@@ -297,7 +300,7 @@ pipeline.py
 Prefer `mimo.py` alone, then SCP yourself. Or use pipeline with processing/LoRa skipped:
 
 ```bash
-python3 pipeline.py --duration 10 --label my_capture \
+python3 pipeline.py --frames 100 --label my_capture \
   --radar-config cascade_tx3_rx16 \
   --skip-ps --skip-lora
 ```
@@ -305,13 +308,13 @@ python3 pipeline.py --duration 10 --label my_capture \
 ### Full monitoring example (original SHM workflow)
 
 ```bash
-python3 pipeline.py --duration 15 --label RPI_python_bridge \
+python3 pipeline.py --frames 150 --label RPI_python_bridge \
   --radar-config cascade_tx3_rx16
 ```
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `-t` / `--duration` | `10` | Seconds (passed to `mimo.py`) |
+| `--frames` | `100` | Radar frames (passed to `mimo.py`) |
 | `--label` | `RPI_python` | Capture prefix |
 | `--tda-ip` | `192.168.33.180` | TDA IP |
 | `--radar-config` | `cascade_tx3_rx16` | Passed through to `mimo.py` |
@@ -349,7 +352,7 @@ the uploaded `.mmwave.json` / IR `.npy` sidecars).
 
 | Goal | Use |
 |------|-----|
-| Raw IF `.bin` only (recommended) | `python3 mimo.py --duration … --radar-config …` |
+| Raw IF `.bin` only (recommended) | `python3 mimo.py --frames … --radar-config …` |
 | Same, but legacy C CLI | `./mmwave -c -r -t … [-f config/….toml]` |
 | Capture + auto SCP + PS + LoRa | `python3 pipeline.py …` |
 | Capture + SCP only | `pipeline.py … --skip-ps --skip-lora` |

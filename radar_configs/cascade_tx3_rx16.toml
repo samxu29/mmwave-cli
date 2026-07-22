@@ -30,7 +30,7 @@ txPhaseShifter = 0x00
 
 [mimo.frame]
 numLoops = 255                  # mimo.c PATCHED value (was 16)
-numFrames = 0                   # Number of frames to record (0 = infinite)
+numFrames = 0                   # Overridden by mimo.py --frames (0 in TOML = unused)
 framePeriodicity = 100          # ms - mimo.c PATCHED value (was 50; 10Hz frame rate)
 chirpStartIdx = 0
 chirpEndIdx = 2                 # 3 chirps (0-2)
