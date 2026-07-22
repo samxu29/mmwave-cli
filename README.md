@@ -11,8 +11,8 @@ Two capture front-ends share the same hardware:
 
 | Path | Entry point | Config | Typical use |
 |------|-------------|--------|-------------|
-| **Legacy C binary** | `./mmwave` (from `mimo.c`) | `config/*.toml` via `-f` / `--cfg` | Original CLI, simple record |
 | **Python / Cython** | `mimo.py` (+ optional `pipeline.py`) | `radar_configs/*.toml` via `--radar-config` | Current workflow: raw IF capture |
+| **Legacy C binary** | `./mmwave` (from `mimo.c`) | `config/*.toml` via `-f` / `--cfg` | Original CLI, simple record |
 
 **Notes**
 - Only Ethernet to the TDA is supported (default IP `192.168.33.180`, port `5001`).
@@ -37,12 +37,8 @@ Two capture front-ends share the same hardware:
 
 ```
 mmwave-cli/
-├── mimo.c / mimo.h          # Legacy C capture tool → builds ./mmwave
-├── makefile                 # make all / make build / make install
-├── config/                  # TOML presets for ./mmwave (C path)
-│   ├── short-range-cfg.toml
-│   └── ...
 ├── mimo.py                  # Python capture (raw IF) — uses mmwcas + radar_configs/
+├── mimo_interactive.py      # [DEPRECATED] REPL wrapper around mimo.py — bench/manual only
 ├── mmwcas.pyx               # Cython bridge to TI mmWaveLink (C structs zeroed;
 │                            #   all RF values come from TOML via mmw_set_config)
 ├── radar_config.py          # Loads radar_configs/*.toml
@@ -52,12 +48,193 @@ mmwave-cli/
 ├── pipeline.py              # Optional: capture → SCP → edge PS → LoRa
 ├── utility.py               # SCP helpers, .mmwave.json export, etc.
 ├── setup.py                 # Build mmwcas Cython extension
+├── mimo.c / mimo.h          # Legacy C capture tool → builds ./mmwave
+├── makefile                 # make all / make build / make install
+├── config/                  # TOML presets for ./mmwave (C path)
+│   ├── short-range-cfg.toml
+│   └── ...
 └── ti/                      # TI SDK / firmware (do not modify casually)
 ```
 
 ---
 
-## 1. Legacy C binary (`./mmwave`)
+## 1. Python / Cython path (`mimo.py`)
+
+This is the recommended path for raw IF capture on Linux / Raspberry Pi.
+
+### Dependencies
+
+```bash
+pip install cython numpy pyserial
+pip install tomli   # only needed on Python < 3.11 (stdlib tomllib on 3.11+)
+```
+
+### Build the `mmwcas` extension
+
+```bash
+make build-cython
+# or
+python3 setup.py build_ext --inplace
+```
+
+Verify:
+
+```bash
+python3 -c "import mmwcas; print('mmwcas OK')"
+```
+
+Full clean rebuild of C binary + Cython:
+
+```bash
+make build
+```
+
+### What `mimo.py` does
+
+1. Loads a preset from `radar_configs/<name>.toml`
+2. Calls `mmwcas.mmw_set_config()` then `mmw_init()`
+3. Arms TDA → starts frames → waits N × framePeriodicity (+ 1 period) → stops
+   (`--frames` programs radar `numFrames` + TDA `numberOfFramesToCapture`)
+4. Writes `mmwave_json_files/<capture>.mmwave.json` and optionally IR timestamps
+5. Uploads those sidecars into `/mnt/ssd/<capture_dir>/` next to the raw `.bin`s
+6. Exits (single capture per process invocation)
+
+It does **not** run edge processing or LoRa.
+
+**No built-in repeat-capture loop** (removed): running several captures
+back-to-back within the same process - even with a real cooldown between
+them - still showed capture sizes drifting smaller for identical `--frames`,
+most likely an SSD/network throughput ceiling on the TDA (frame drops), not
+something fixable host-side. For repeated captures, run `mimo.py` again
+(fresh process each time) via a shell loop / cron / `pipeline.py`, so you
+control spacing and each capture gets a fully fresh `mmw_init()`.
+
+### Typical usage (raw IF only)
+
+```bash
+# 100 frames (~10 s @ 100 ms), default radar preset (cascade_tx3_rx16)
+python3 mimo.py --frames 100 --directory my_capture
+
+# 300 frames ≈ 30 s at 10 fps
+python3 mimo.py --frames 300 --directory my_capture --radar-config cascade_tx3_rx16
+
+# TI full 12-chirp MIMO (from Cascade_Configuration_MIMO.lua)
+python3 mimo.py --frames 100 --directory my_capture --radar-config cascade_mimo
+
+# Disable IR GPIO timestamps
+python3 mimo.py --frames 100 --no-ir
+```
+
+### CLI options (`mimo.py`)
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-d` / `--directory` | `mmwave_python` | Capture name prefix (timestamp appended) |
+| `--frames` | `100` | Capture length in **radar frames** (exact) |
+| `--tda-ip` | `192.168.33.180` | TDA IP |
+| `--radar-config` | `cascade_tx3_rx16` | Preset name = `radar_configs/<name>.toml` |
+| `--no-ir` | off | Disable IR timestamp logging |
+| `--ir-pin` | `4` | BCM GPIO pin |
+| `--ir-bounce-ms` | `200` | Debounce (ms) |
+
+### [DEPRECATED] `mimo_interactive.py` - REPL capture
+
+Bench/manual-testing-only wrapper that reuses `mimo.py`'s capture logic
+(`run_one_capture()`) in a loop: configure the radar once, then repeatedly
+type an experiment name (+ optional frame count) at an `experiment>` prompt
+to arm + record, e.g. `bridge_test` or `bridge_test 300`. Blank/`quit`/`exit`
+stops.
+
+**Do not use for real data collection.** Two hardware limitations, neither
+fixable host-side:
+- Frame counts are wall-clock-based (RF chips stay at `numFrames=0`/infinite
+  the whole session), not hardware-exact like `mimo.py`'s single-capture mode.
+- Making many captures back-to-back in one long-lived process is exactly the
+  scenario that showed SSD/network throughput drift (capture sizes shrinking
+  run to run) - see `mimo.py`'s module docstring.
+
+For real captures, use `mimo.py` (one exact capture per process invocation)
+driven by `pipeline.py` or an external shell loop instead.
+
+```bash
+python3 mimo_interactive.py --frames 100
+# experiment> bridge_test
+# experiment> bridge_test 300
+```
+
+### Python-path TOML (`radar_configs/*.toml`)
+
+**This is the only RF/geometry source for `mimo.py`.**  
+`mmwcas.pyx` keeps zeroed C structs; missing TOML fields raise `ValueError`.
+
+Preset name = filename without `.toml`:
+
+| File | `--radar-config` | Meaning |
+|------|------------------|---------|
+| `radar_configs/cascade_tx3_rx16.toml` | `cascade_tx3_rx16` | **Default.** 3 chirps, Dev4 TX0/1/2, idle 175/7/7 µs, 4400 ksps, 255 loops, 100 ms frames |
+| `radar_configs/cascade_mimo.toml` | `cascade_mimo` | TI Lua MIMO: 12 chirps, all 4 devices TX, slope 79, 8000 ksps, 64 loops, 10 frames |
+
+#### Add a new preset
+
+```bash
+cp radar_configs/cascade_tx3_rx16.toml radar_configs/my_setup.toml
+# edit my_setup.toml
+python3 mimo.py --radar-config my_setup --frames 100
+```
+
+No Python edits required — files in `radar_configs/` are loaded automatically.
+
+#### Schema overview (required sections)
+
+```toml
+[mimo.profile]
+startFrequency = 77
+frequencySlope = 60
+idleTimes = [175, 7, 7]        # one idle time per profile slot (exactly 3)
+adcStartTime = 6
+numAdcSamples = 256
+adcSamplingFrequency = 4400
+rampEndTime = 65
+rxGain = 48
+# ... pfVcoSelect, HPF, backoff, etc.
+
+[mimo.frame]
+numLoops = 255
+numFrames = 0                  # overridden by mimo.py --frames
+framePeriodicity = 100
+chirpStartIdx = 0
+chirpEndIdx = 2
+# ...
+
+[mimo.channel]
+rxChannelEn = 0x0F
+txChannelEn = 0x07
+
+[mimo.chirp]
+numChirps = 3
+profileIdPerChirp = [0, 1, 2]
+txAntennaTable = [             # per device, local TX index per chirp (-1 = off)
+    [-1, -1, -1],
+    [-1, -1, -1],
+    [-1, -1, -1],
+    [0, 1, 2],
+]
+# ...
+
+[mimo.adcOut]
+[mimo.lowPower]
+[mimo.misc]
+[mimo.ldo]
+[mimo.datapath]
+# see cascade_tx3_rx16.toml for every required field
+```
+
+`config/*.toml` (C) and `radar_configs/*.toml` (Python) are **different schemas** —
+do not mix them.
+
+---
+
+## 2. Legacy C binary (`./mmwave`)
 
 ### Build
 
@@ -129,156 +306,6 @@ txChannelEn = 7
 
 Examples live in `config/`. If `-f` is omitted, hardcoded defaults inside
 `mimo.c` are used.
-
----
-
-## 2. Python / Cython path (`mimo.py`)
-
-This is the recommended path for raw IF capture on Linux / Raspberry Pi.
-
-### Dependencies
-
-```bash
-pip install cython numpy pyserial
-pip install tomli   # only needed on Python < 3.11 (stdlib tomllib on 3.11+)
-```
-
-### Build the `mmwcas` extension
-
-```bash
-make build-cython
-# or
-python3 setup.py build_ext --inplace
-```
-
-Verify:
-
-```bash
-python3 -c "import mmwcas; print('mmwcas OK')"
-```
-
-Full clean rebuild of C binary + Cython:
-
-```bash
-make build
-```
-
-### What `mimo.py` does
-
-1. Loads a preset from `radar_configs/<name>.toml`
-2. Calls `mmwcas.mmw_set_config()` then `mmw_init()`
-3. Arms TDA → starts frames → waits N × framePeriodicity (+ 1 period) → stops
-   (`--frames` programs radar `numFrames` + TDA `numberOfFramesToCapture`)
-4. Writes `mmwave_json_files/<capture>.mmwave.json` and optionally IR timestamps
-5. Uploads those sidecars into `/mnt/ssd/<capture_dir>/` next to the raw `.bin`s
-
-It does **not** run edge processing or LoRa.
-
-### Typical usage (raw IF only)
-
-```bash
-# 100 frames (~10 s @ 100 ms), default radar preset (cascade_tx3_rx16)
-python3 mimo.py --frames 100 --directory my_capture
-
-# 300 frames ≈ 30 s at 10 fps
-python3 mimo.py --frames 300 --directory my_capture --radar-config cascade_tx3_rx16
-
-# TI full 12-chirp MIMO (from Cascade_Configuration_MIMO.lua)
-python3 mimo.py --frames 100 --directory my_capture --radar-config cascade_mimo
-
-# Interactive naming (configure once; optional frames per prompt)
-python3 mimo.py --interactive --frames 100
-# experiment> bridge_test
-# experiment> bridge_test 300
-
-# Disable IR GPIO timestamps
-python3 mimo.py --frames 100 --no-ir
-```
-
-### CLI options (`mimo.py`)
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `-d` / `--directory` | `mmwave_python` | Capture name prefix (timestamp appended) |
-| `--frames` | `100` | Capture length in **radar frames** (exact) |
-| `--tda-ip` | `192.168.33.180` | TDA IP |
-| `-n` / `--num-loops` | `1` | Loops (`0` = until Ctrl+C) |
-| `-i` / `--inter-loop-time` | `60` | Delay between loops (s) |
-| `-I` / `--interactive` | off | REPL capture names |
-| `--radar-config` | `cascade_tx3_rx16` | Preset name = `radar_configs/<name>.toml` |
-| `--no-ir` | off | Disable IR timestamp logging |
-| `--ir-pin` | `4` | BCM GPIO pin |
-| `--ir-bounce-ms` | `200` | Debounce (ms) |
-
-### Python-path TOML (`radar_configs/*.toml`)
-
-**This is the only RF/geometry source for `mimo.py`.**  
-`mmwcas.pyx` keeps zeroed C structs; missing TOML fields raise `ValueError`.
-
-Preset name = filename without `.toml`:
-
-| File | `--radar-config` | Meaning |
-|------|------------------|---------|
-| `radar_configs/cascade_tx3_rx16.toml` | `cascade_tx3_rx16` | **Default.** 3 chirps, Dev4 TX0/1/2, idle 175/7/7 µs, 4400 ksps, 255 loops, 100 ms frames |
-| `radar_configs/cascade_mimo.toml` | `cascade_mimo` | TI Lua MIMO: 12 chirps, all 4 devices TX, slope 79, 8000 ksps, 64 loops, 10 frames |
-
-#### Add a new preset
-
-```bash
-cp radar_configs/cascade_tx3_rx16.toml radar_configs/my_setup.toml
-# edit my_setup.toml
-python3 mimo.py --radar-config my_setup --frames 100
-```
-
-No Python edits required — files in `radar_configs/` are loaded automatically.
-
-#### Schema overview (required sections)
-
-```toml
-[mimo.profile]
-startFrequency = 77
-frequencySlope = 60
-idleTimes = [175, 7, 7]        # one idle time per profile slot (exactly 3)
-adcStartTime = 6
-numAdcSamples = 256
-adcSamplingFrequency = 4400
-rampEndTime = 65
-rxGain = 48
-# ... pfVcoSelect, HPF, backoff, etc.
-
-[mimo.frame]
-numLoops = 255
-numFrames = 0                  # overridden by mimo.py --frames
-framePeriodicity = 100
-chirpStartIdx = 0
-chirpEndIdx = 2
-# ...
-
-[mimo.channel]
-rxChannelEn = 0x0F
-txChannelEn = 0x07
-
-[mimo.chirp]
-numChirps = 3
-profileIdPerChirp = [0, 1, 2]
-txAntennaTable = [             # per device, local TX index per chirp (-1 = off)
-    [-1, -1, -1],
-    [-1, -1, -1],
-    [-1, -1, -1],
-    [0, 1, 2],
-]
-# ...
-
-[mimo.adcOut]
-[mimo.lowPower]
-[mimo.misc]
-[mimo.ldo]
-[mimo.datapath]
-# see cascade_tx3_rx16.toml for every required field
-```
-
-`config/*.toml` (C) and `radar_configs/*.toml` (Python) are **different schemas** —
-do not mix them.
 
 ---
 

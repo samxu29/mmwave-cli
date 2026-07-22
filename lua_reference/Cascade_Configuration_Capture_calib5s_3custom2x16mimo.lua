@@ -65,7 +65,7 @@ local start_freq                =   77     -- GHz
 local slope                     =   60     -- MHz/us
 local adc_start_time            =   6      -- us
 local adc_samples               =   256    -- Number of samples per chirp
-local sample_freq               =   8000   -- ksps
+local sample_freq               =   4400   -- ksps
 local ramp_end_time             =   65     -- us
 local rx_gain                   =   48     -- dB
 

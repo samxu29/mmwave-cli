@@ -12,17 +12,14 @@ The radar + TDA are programmed with that numFrames so they stop after exactly
 N frames (e.g. 300 frames @ 100 ms period ≈ 30 s). Host sleep is only
 N × framePeriodicity + a small margin so we do not stop_frame early.
 
-Two capture modes, both configure the radar ONCE then loop:
-  - Default: automatic loop, driven by --num-loops/--inter-loop-time (used by
-    pipeline.py).
-  - --interactive: REPL loop mirroring mimo.c's --interactive - type an
-    experiment name (+ optional frame count) at the `experiment>` prompt to
-    arm + record; blank/quit/exit to stop. RF is configured once at startup
-    with numFrames=0 (infinite); each prompt's frame count only controls the
-    host wait before mmw_stop_frame(), so it is wall-clock-based/approximate,
-    not hardware-exact - a live per-capture RF reconfigure was tried and
-    reverted after it wedged the RF chips on real hardware (see
-    run_one_capture()'s docstring).
+Single capture per process invocation, then exit (used by pipeline.py). For
+repeats, re-invoke this script (fresh mmw_init() each time) from pipeline.py,
+a shell loop, or cron - do not add a capture loop back into this file (see
+the "Single capture, then exit" comment in main() for why).
+
+The old --interactive REPL mode (configure once, loop on typed experiment
+names) has moved to mimo_interactive.py and is DEPRECATED - see that file's
+docstring.
 
 IR sensor timestamp logging (replaces the old run_experiment.sh + ir_logger.py
 signal-based glue) is now built in: GPIO edge detection is armed once at
@@ -74,12 +71,10 @@ except ImportError:
 
 # RF/geometry config dict - selected from radar_config.RADAR_CONFIGS in
 # main() based on --radar-config (defaults to cascade_tx3_rx16). Set here so
-# run_one_capture() (which reads this module-level global) works whether
-# called from main()'s automatic loop or run_interactive().
+# run_one_capture() (which reads this module-level global) works. Also read/
+# reassigned directly by mimo_interactive.py (DEPRECATED REPL wrapper) so
+# that script can reuse this module's capture logic unmodified.
 config_dict = get_radar_config(DEFAULT_RADAR_CONFIG)
-
-# Global flag for graceful shutdown
-shutdown_flag = False
 
 # IR sensor state - populated by setup_ir_sensor(), consumed by
 # run_one_capture(). ir_recording gates whether the callback (which fires on
@@ -144,7 +139,9 @@ def run_one_capture(exp_label, num_frames, tda_ip):
     Arm the TDA, record one capture, de-arm, then verify + export the
     .mmwave.json sidecar. Same division of responsibility as mimo.c's
     run_capture(). Safe to call repeatedly after a single mmw_set_config()/
-    mmw_init() (see --interactive).
+    mmw_init() - reused by the DEPRECATED mimo_interactive.py REPL for
+    exactly that, though repeated same-process captures are the case known
+    to show SSD/network throughput drift (see mimo.py's module docstring).
 
     Capture length is num_frames: the host waits
     num_frames × framePeriodicity + one period margin before calling
@@ -240,60 +237,6 @@ def run_one_capture(exp_label, num_frames, tda_ip):
     return status, capture_dir
 
 
-def run_interactive(args):
-    """
-    REPL loop mirroring mimo.c's --interactive mode: configure once (already
-    done by the caller with RF numFrames=0, i.e. infinite framing), then
-    repeatedly prompt for an experiment name and optional frame count. Each
-    capture arms the TDA and waits num_frames × framePeriodicity (+ margin)
-    before calling mmw_stop_frame() - no RF reconfiguration between captures
-    (see run_one_capture()'s docstring for why: live MMWL_frameConfig() RPCs
-    mid-session proved unreliable on real hardware). Frame counts here are
-    therefore approximate (wall-clock based, a few % jitter run to run), not
-    hardware-exact.
-    """
-    period_ms = float(config_dict["mimo"]["frame"]["framePeriodicity"])
-    print("\n=== Interactive multi-capture mode ===")
-    print("Radar is configured and the connection to the TDA is live.")
-    print("At the prompt, type an experiment name to arm + record, e.g.:")
-    print(f"  bridge_test          (uses --frames default: {args.frames})")
-    print(f"  bridge_test 300      (300 frames for this capture only)")
-    print("Frame counts are wall-clock based (approximate, +/- a few % run to "
-          "run) - the RF chips are NOT reconfigured per prompt.")
-    print(f"Frame period: {period_ms:.0f} ms  ({1000.0/period_ms:.1f} fps)")
-    print("Type 'quit'/'exit' or leave blank to stop.\n")
-
-    while True:
-        if shutdown_flag:
-            print("\n Shutdown requested. Exiting interactive mode...")
-            break
-        try:
-            line = input("experiment> ").strip()
-        except EOFError:
-            break
-        if not line or line in ("quit", "exit"):
-            break
-
-        parts = line.split()
-        exp_name = parts[0]
-        try:
-            num_frames = int(parts[1]) if len(parts) >= 2 else args.frames
-        except ValueError:
-            print(f"Could not parse frame count; using default {args.frames}.")
-            num_frames = args.frames
-        if num_frames < 1:
-            print("Frame count must be >= 1; using configured --frames.")
-            num_frames = args.frames
-
-        status, capture_dir = run_one_capture(exp_name, num_frames, args.tda_ip)
-        if status == 0:
-            print(f">>> Capture '{capture_dir}' completed successfully.\n")
-        else:
-            print(f">>> Capture '{capture_dir}' finished with errors (status {status}). Continuing...\n")
-
-    print("Exiting interactive mode.")
-
-
 def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='TIDEP-01012 MIMO Cascade Radar Control IMRSL')
@@ -311,26 +254,6 @@ def main():
                         type=str,
                         default='192.168.33.180',
                         help='TDA board IP address (default: 192.168.33.180)')
-    parser.add_argument('-n', '--num-loops',
-                        type=int,
-                        default=1,
-                        help='Number of capture loops (default: 1, 0 = infinite until Ctrl+C)')
-    parser.add_argument('-i', '--inter-loop-time',
-                        type=float,
-                        default=60.0,
-                        help='Delay between capture loops in seconds (default: 60.0)')
-    parser.add_argument('-I', '--interactive',
-                        action='store_true',
-                        help="Configure once, then repeatedly prompt for an experiment name and "
-                             "record - no reconfiguration between captures. At the prompt, type "
-                             "'<name>' or '<name> <frames>' to capture, or 'quit'/blank to exit.")
-    parser.add_argument('--prompt-name',
-                        action='store_true',
-                        help="In the automatic loop (--num-loops, NOT --interactive), prompt for "
-                             "an experiment name before each capture. Frame count stays fixed at "
-                             "--frames the whole run (no live RF reconfiguration - safe/exact, "
-                             "unlike --interactive's per-prompt frame count). Blank = reuse the "
-                             "last name; 'quit'/'exit' stops the loop early.")
     parser.add_argument('--no-ir',
                         action='store_true',
                         help='Disable IR sensor timestamp logging entirely (default: enabled if '
@@ -353,13 +276,10 @@ def main():
 
     args = parser.parse_args()
 
-    # Register signal handler for Ctrl+C
+    # Register signal handler for Ctrl+C.
     signal.signal(signal.SIGINT, signal_handler)
 
     # Validate arguments
-    if args.num_loops < 0:
-        print("Error: --num-loops must be >= 0")
-        sys.exit(1)
     if args.frames < 1:
         print("Error: --frames must be >= 1")
         sys.exit(1)
@@ -370,25 +290,10 @@ def main():
     config_dict = copy.deepcopy(get_radar_config(args.radar_config))
     period_ms = float(config_dict["mimo"]["frame"]["framePeriodicity"])
     period_s = period_ms / 1000.0
-
-    # Interactive: RF chips stay at numFrames=0 (infinite) so each prompt can
-    # request a different length via TDA arming. Non-interactive: program the
-    # chips with the exact frame count as well.
-    if args.interactive:
-        config_dict["mimo"]["frame"]["numFrames"] = 0
-    else:
-        config_dict["mimo"]["frame"]["numFrames"] = args.frames
+    config_dict["mimo"]["frame"]["numFrames"] = args.frames
     approx_s = args.frames * period_s
 
-    print(f"Capture frames   : {args.frames}  (~{approx_s:.1f}s @ {period_ms:.0f} ms/frame)"
-          + ("  [interactive default; override per prompt]" if args.interactive else ""))
-    if args.interactive:
-        print("Mode: interactive (configure once, loop on typed experiment names)")
-    else:
-        print(f"Number of loops  : {'Infinite (until Ctrl+C)' if args.num_loops == 0 else args.num_loops}")
-        if args.num_loops != 1:
-            print(f"Inter-loop delay : {args.inter_loop_time} seconds")
-
+    print(f"Capture frames   : {args.frames}  (~{approx_s:.1f}s @ {period_ms:.0f} ms/frame)")
     print(f"Radar config     : {args.radar_config}")
 
     # Configure radar
@@ -409,63 +314,26 @@ def main():
     else:
         print("[IR] IR sensor timestamp logging disabled (--no-ir).")
 
-    if args.interactive:
-        try:
-            run_interactive(args)
-        except KeyboardInterrupt:
-            print("\n\nInteractive mode interrupted by user")
-            sys.exit(130)
-        finally:
-            teardown_ir_sensor()
-        return
-
-    # Automatic capture loop
-    loop_count = 0
-    infinite_mode = (args.num_loops == 0)
-    current_label = args.directory
-
-    if args.prompt_name:
-        print(f"\n[--prompt-name] Will ask for an experiment name before each capture "
-              f"(frame count fixed at {args.frames} the whole run - no RF reconfiguration).")
-        print("Blank = reuse the last name; 'quit'/'exit' stops the loop early.\n")
+    # Single capture, then exit. Repeated back-to-back captures within the
+    # same process (formerly --num-loops/--inter-loop-time) were removed:
+    # even with a real cooldown sleep between them, capture sizes for
+    # identical --frames still drifted smaller run to run - almost certainly
+    # an SSD/network throughput ceiling on the TDA (frame drops), not
+    # something fixable from the host side. Run mimo.py again (fresh process,
+    # fresh mmw_init()) for each capture, or drive repeats externally (a
+    # shell loop, cron, or pipeline.py) so you control the spacing.
+    print("\n" + "="*60)
+    print(f"Recording frames: {args.frames}  (~{args.frames * period_s:.1f}s)")
+    print("="*60)
 
     try:
-        while True:
-            # Check if we should continue
-            if not infinite_mode and loop_count >= args.num_loops:
-                break
+        status, capture_dir = run_one_capture(args.directory, args.frames, args.tda_ip)
+        if status != 0:
+            sys.exit(1)
 
-            if shutdown_flag:
-                print("\n Shutdown requested. Exiting capture loop...")
-                break
-
-            if args.prompt_name:
-                try:
-                    typed = input(f"experiment name [{current_label}]> ").strip()
-                except EOFError:
-                    break
-                if typed in ("quit", "exit"):
-                    break
-                if typed:
-                    current_label = typed
-
-            loop_count += 1
-
-            print("\n" + "="*60)
-            print(f"CAPTURE LOOP {loop_count}" + (" (INFINITE MODE)" if infinite_mode else f" of {args.num_loops}"))
-            print("="*60)
-            print(f"Experiment name : {current_label}")
-            print(f"Recording frames: {args.frames}  (~{args.frames * period_s:.1f}s)")
-            print("="*60)
-
-            status, capture_dir = run_one_capture(current_label, args.frames, args.tda_ip)
-            if status != 0:
-                time.sleep(1)
-                continue  # Skip to next loop
-
-            print("\n" + "="*60)
-            print(f"Data capture {capture_dir} completed successfully!")
-            print("="*60)
+        print("\n" + "="*60)
+        print(f"Data capture {capture_dir} completed successfully!")
+        print("="*60)
 
     except KeyboardInterrupt:
         print("\n\nCapture interrupted by user")

@@ -99,7 +99,6 @@ def run_capture(num_frames: int, tda_ip: str, label: str,
         os.path.join(SCRIPT_DIR, 'mimo.py'),
         '--frames', str(num_frames),
         '--tda-ip',   tda_ip,
-        '--num-loops', '1',
         '--directory', label,
         '--radar-config', radar_config,
     ]

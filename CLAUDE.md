@@ -57,8 +57,12 @@ python3 -c "import mmwcas; print('mmwcas OK')"
 - `numLoops = 255` chirp loops per frame (was 16)
 - 3 chirps only (not 12), single TX device (TX0/TX1/TX2 on chirp0/1/2), 3 profiles
   with idle time 175μs/7μs/7μs (fixed, not configurable via `config_dict`)
-- `mimo.py` also supports `-I`/`--interactive`: configure once, then loop on typed
-  experiment names (mirrors `mimo.c`'s `--interactive`)
+- `mimo.py` runs exactly one capture per process invocation, then exits (no
+  built-in loop - repeated same-process captures showed SSD/network
+  throughput drift; use `pipeline.py` or an external shell loop instead).
+  The old `-I`/`--interactive` REPL mode (configure once, loop on typed
+  experiment names) has moved to `mimo_interactive.py` and is
+  **DEPRECATED** (bench/manual testing only, not for real captures).
 - `dt` in edge processing is read automatically from `.mmwave.json` per capture (falls back to `DT_DEFAULT = 0.05`)
 - IR sensor timestamp logging is built directly into `mimo.py` (replaces the old
   `run_experiment.sh` + `ir_logger.py` signal-based glue, both removed): GPIO
@@ -81,6 +85,7 @@ python3 -c "import mmwcas; print('mmwcas OK')"
 ```
 mmwave-cli/                         ← this repo (runs on Raspberry Pi ~/mmwave-cli/)
 ├── mimo.py                         ← radar control: configure, arm, capture, stop
+├── mimo_interactive.py             ← [DEPRECATED] REPL wrapper around mimo.py — bench/manual only
 ├── radar_config.py                 ← loads RF/geometry presets from radar_configs/*.toml
 ├── radar_configs/                  ← RF/geometry presets (TOML), select via --radar-config <name>
 │   └── default.toml
@@ -119,7 +124,7 @@ mmwave-cli/                         ← this repo (runs on Raspberry Pi ~/mmwave
 Five sequential steps per cycle, runs continuously until `Ctrl+C`:
 
 ```
-Step 1 — Capture      mimo.py --duration N --num-loops 1 --directory <label>
+Step 1 — Capture      mimo.py --frames N --directory <label>
 Step 2 — Transfer     SCP root@TDA:/mnt/ssd/<dir> → ~/IoSAR-EdgeProcessing/PostProc/
                       then: rm -rf /mnt/ssd/<dir> on TDA (auto-delete after transfer)
 Step 3 — Processing   [DEBUG only] mimo_processing.process_capture() → SLC.png, range-profile.png
