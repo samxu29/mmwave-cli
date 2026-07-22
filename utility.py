@@ -40,22 +40,33 @@ def _ls_capture_dir(remote_path, tda_ip):
     return (len(files) > 0), len(files), files
 
 
-def check_captured_files(capture_dir, tda_ip="192.168.33.180", retries=4, retry_delay=2.0):
+def check_captured_files(capture_dir, tda_ip="192.168.33.180", retries=4, retry_delay=2.0,
+                          settle_checks=4, settle_delay=2.0):
     """
-    Check if files were actually captured on the TDA board via SSH.
+    Check if files were actually captured on the TDA board via SSH, AND that
+    they have finished flushing (sizes have stopped changing).
 
     mmw_dearming_tda() only confirms the TDA firmware accepted the stop
     command - it does NOT wait for buffered frames to actually flush to
     /mnt/ssd/. Immediately after a capture, the directory can transiently
     exist-but-be-empty (or not exist yet) while the flush is still in
-    flight, especially for longer captures. So this retries with a short
-    delay before declaring failure, instead of a single immediate `ls`.
+    flight, especially for longer captures - the existence-retry loop below
+    handles that. But existence alone is not enough: once files *appear*
+    they can still be mid-write for a while longer (observed: back-to-back
+    captures with identical numFrames produced different final byte counts,
+    each smaller than the true frame count, because the next capture's arm/
+    reconfigure started while the previous one's data was still landing on
+    disk and got cut off). So after files are found, we poll their sizes a
+    few more times and only declare success once two consecutive reads are
+    byte-identical - i.e. the flush has actually finished, not just started.
 
     Args:
         capture_dir: The capture directory name
         tda_ip: IP address of the TDA board (default: 192.168.33.180)
-        retries: Number of SSH `ls` attempts before giving up (default: 4)
-        retry_delay: Seconds to wait between attempts (default: 2.0)
+        retries: Number of SSH `ls` attempts before giving up on existence (default: 4)
+        retry_delay: Seconds to wait between existence-check attempts (default: 2.0)
+        settle_checks: Max extra `ls` polls to confirm sizes have stopped growing (default: 4)
+        settle_delay: Seconds to wait between settle-check polls (default: 2.0)
 
     Returns:
         tuple: (success: bool, file_count: int, file_list: list)
@@ -72,8 +83,30 @@ def check_captured_files(capture_dir, tda_ip="192.168.33.180", retries=4, retry_
             success, file_count, files = _ls_capture_dir(remote_path, tda_ip)
 
             if success:
+                # Confirm the flush has actually finished: keep polling sizes
+                # until two consecutive reads agree, or we run out of budget.
+                stable = False
+                for settle_attempt in range(1, settle_checks + 1):
+                    time.sleep(settle_delay)
+                    _, _, files_now = _ls_capture_dir(remote_path, tda_ip)
+                    if files_now == files:
+                        stable = True
+                        break
+                    print(f"\n Files still growing (flush in progress, "
+                          f"settle check {settle_attempt}/{settle_checks}) - "
+                          f"re-checking in {settle_delay}s...")
+                    files = files_now
+                    file_count = len(files)
+
+                if not stable:
+                    print(f"\n WARNING: File sizes did not stabilize after "
+                          f"{settle_checks} extra check(s) - reported sizes may "
+                          f"still be incomplete. Consider adding --interval / "
+                          f"pausing longer between captures.")
+
                 print(f"\n SUCCESS: Found {file_count} file(s) in capture directory"
-                      + (f" (attempt {attempt}/{retries})" if attempt > 1 else ""))
+                      + (f" (attempt {attempt}/{retries})" if attempt > 1 else "")
+                      + (" [sizes stable]" if stable else " [sizes NOT confirmed stable]"))
                 print(f"\nCaptured files:")
                 print(f"{'-'*60}")
                 for filename, size in files:
