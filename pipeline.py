@@ -82,7 +82,7 @@ def _step_done(name: str, t_start: float) -> float:
 # Step 1 — Capture
 # ─────────────────────────────────────────────
 
-def run_capture(duration: float, tda_ip: str, label: str) -> str | None:
+def run_capture(duration: float, tda_ip: str, label: str, radar_config: str = 'default') -> str | None:
     """
     Execute one capture cycle via mimo.py.
     Returns the capture directory name (e.g. 'RPI_python_sine_2hz_1mm_10s_20260510_144105'),
@@ -100,6 +100,7 @@ def run_capture(duration: float, tda_ip: str, label: str) -> str | None:
         '--tda-ip',   tda_ip,
         '--num-loops', '1',
         '--directory', label,
+        '--radar-config', radar_config,
     ]
     result = subprocess.run(cmd)
 
@@ -325,6 +326,10 @@ def main():
                              'Timestamp is appended automatically by mimo.py.')
     parser.add_argument('--tda-ip',          type=str,   default=TDA_IP_DEFAULT,
                         help='TDA board IP address')
+    parser.add_argument('--radar-config',    type=str,   default='default',
+                        help='Named RF/geometry preset from radar_config.py, passed through to '
+                             "mimo.py --radar-config (default: 'default'). Add new idle-time/"
+                             'antenna-geometry presets in radar_config.py, not here.')
     parser.add_argument('-i', '--interval',  type=float, default=0.0,
                         help='Wait time between cycles in seconds (0 = no delay)')
     parser.add_argument('--debug',           action='store_true',
@@ -384,7 +389,7 @@ def main():
 
         # ── 1. Capture ──────────────────────────────────────────────
         t1 = _step_start(f'Step 1 — Capture ({args.duration}s)')
-        capture_dir = run_capture(args.duration, args.tda_ip, args.label)
+        capture_dir = run_capture(args.duration, args.tda_ip, args.label, args.radar_config)
         if capture_dir is None:
             print('[PIPELINE] Capture failed — retrying in 10s...')
             time.sleep(10)

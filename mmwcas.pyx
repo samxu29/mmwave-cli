@@ -168,8 +168,40 @@ cdef int RL_RET_CODE_OK = 0               # Return code for success
 
 # Development environment flag and other constants
 cdef int DEV_ENV = 1
-cdef int NUM_CHIRPS = 3    # PATCHED: was 12 (full 4-device MIMO). Matches mimo.c -
-                           # 3 chirps, TX0/TX1/TX2 on a single device only.
+# Filled exclusively by mmw_set_config() from radar_configs/*.toml.
+# Left at 0 / empty so calling mmw_init() without a complete TOML fails loudly
+# instead of silently programming the radar with stale hardcoded values.
+cdef int NUM_CHIRPS = 0
+_tx_antenna_table = []
+_profile_id_per_chirp = []
+_config_applied = False   # True after a successful mmw_set_config() call
+
+# Mbps -> rlDevDataPathClkCfg_t.dataRate field code (rl_device.h). DDR-only
+# rates (600/400/225/150) have no SDR equivalent per the SDK header docs.
+_DATA_RATE_CODE_DDR = {600: 1, 450: 2, 400: 3, 300: 4, 225: 5, 150: 6}
+_DATA_RATE_CODE_SDR = {450: 2, 300: 4}
+
+# Mbps -> rlDevHsiClk_t.hsiClk field code (rl_device.h), per lane clock mode.
+_HSI_CLK_CODE_DDR = {900: 0xD, 600: 0x9, 450: 0x5, 400: 0x1, 300: 0xA, 225: 0x6, 150: 0xB}
+_HSI_CLK_CODE_SDR = {900: 0x5, 600: 0xA, 450: 0x6, 400: 0x2, 300: 0xB, 225: 0x7}
+
+
+def _lookup_data_rate(mbps, lane_clk_cfg):
+    """Map a requested lane data rate (Mbps) + laneClkCfg (0=SDR, 1=DDR) to
+    the (dataRate, hsiClk) field codes documented in rl_device.h. Raises
+    ValueError for combinations the SDK doesn't support (e.g. 600 Mbps in
+    SDR mode - DDR-only per rlDevDataPathClkCfg_t's doc comment)."""
+    is_ddr = bool(lane_clk_cfg)
+    rate_table = _DATA_RATE_CODE_DDR if is_ddr else _DATA_RATE_CODE_SDR
+    hsi_table = _HSI_CLK_CODE_DDR if is_ddr else _HSI_CLK_CODE_SDR
+    if mbps not in rate_table:
+        mode = "DDR" if is_ddr else "SDR"
+        raise ValueError(
+            f"Unsupported dataRate_Mbps={mbps} for laneClkCfg={lane_clk_cfg} ({mode}). "
+            f"Valid {mode} rates: {sorted(rate_table)}"
+        )
+    return rate_table[mbps], hsi_table[mbps]
+
 
 cdef char* CRED=b"\e[0;31m"    # Terminal code for regular red text
 cdef char* CGREEN=b"\e[0;32m"    # Terminal code for regular greed text
@@ -224,201 +256,38 @@ ctypedef struct devConfig_t:
     rlDevCsi2Cfg_t csi2LaneCfg
 
 """! \brief
-* Profile config API parameters. A profile contains coarse parameters of FMCW chirp such as
-* start frequency, chirp slope, ramp time, idle time etc. Fine dithering values need
-* to be programmed in chirp configuration \ref rlChirpCfg_t
-* \note Maximum of 4 profiles can be configured.
+* C-struct memory the mmWaveLink SDK consumes.
 *
-* PATCHED: 3 separate profiles instead of 1, matching mimo.c exactly
-* (Cascade_Configuration_Capture_Ready2ArmTrigger.lua geometry):
-*   - startFreq=77GHz, slope=60MHz/us, adcStart=6us, rampEnd=65us,
-*     256 samples @ 4400ksps, rxGain=48dB  -- SAME across all 3
-*     (2026-07-22: digOutSampleRate corrected 8000->4400 to match the
-*     AWR1843 reference config's SAMPLE_RATE. These cdef defaults are
-*     fallback values only - mimo.py's config_dict["adcSamplingFrequency"]
-*     always overrides digOutSampleRate at runtime via mmw_set_config below,
-*     so no rebuild is required for the mimo.py pipeline path.)
-*   - idleTime DIFFERS per chirp: profile0=175us, profile1=7us, profile2=7us
+* These are intentionally ZEROED - they are NOT a fallback radar config.
+* radar_configs/*.toml (via radar_config.py -> mmw_set_config) is the only
+* source of RF/geometry values. mmw_set_config() requires every field it
+* applies; a missing TOML key raises ValueError instead of silently using
+* a hardcoded default. mmw_init() refuses to run until mmw_set_config()
+* has succeeded once (_config_applied).
 *
-* Encoding (same scale factors as the original default, verified against it):
-*   startFreqConst: 1 LSB = 53.6441803 Hz  -> 77GHz unchanged (1435384036)
-*   freqSlopeConst: 1 LSB = 48.2797623 kHz/us -> 60MHz/us = round(60000/48.2797623) = 1243
-*   idleTimeConst / adcStartTimeConst / rampEndTime: 1 LSB = 10ns -> value = us * 100
+* Encoding applied by mmw_set_config() (same scale factors as TI docs):
+*   startFreqConst: 1 LSB = 53.6441803 Hz
+*   freqSlopeConst: 1 LSB = 48.2797623 kHz/us
+*   idleTimeConst / adcStartTimeConst / rampEndTime / txStartTime: 1 LSB = 10ns
+*   framePeriodicity / frameTriggerDelay: 1 LSB = 5ns
 */
 """
-cdef rlProfileCfg_t profileCfgArgs0=rlProfileCfg_t(
-    profileId = 0,
-    pfVcoSelect = 0x02,
-    pfCalLutUpdate = 0,
-    startFreqConst = 1435384036,   # 77GHz
-    freqSlopeConst = 1243,         # 60 MHz/us
-    idleTimeConst = 17500,         # 175us
-    adcStartTimeConst = 600,       # 6us
-    rampEndTime = 6500,            # 65us
-    txOutPowerBackoffCode = 0x0,
-    txPhaseShifter = 0x0,
-    txStartTime = 0x0,             # 0us
-    numAdcSamples = 256,
-    digOutSampleRate = 4400,       # 4400 ksps (matches AWR1843 reference)
-    hpfCornerFreq1 = 0x0,
-    hpfCornerFreq2 = 0x0,
-    rxGain = 48,
-)
-
-cdef rlProfileCfg_t profileCfgArgs1=rlProfileCfg_t(
-    profileId = 1,
-    pfVcoSelect = 0x02,
-    pfCalLutUpdate = 0,
-    startFreqConst = 1435384036,   # 77GHz
-    freqSlopeConst = 1243,         # 60 MHz/us
-    idleTimeConst = 700,           # 7us
-    adcStartTimeConst = 600,       # 6us
-    rampEndTime = 6500,            # 65us
-    txOutPowerBackoffCode = 0x0,
-    txPhaseShifter = 0x0,
-    txStartTime = 0x0,
-    numAdcSamples = 256,
-    digOutSampleRate = 4400,
-    hpfCornerFreq1 = 0x0,
-    hpfCornerFreq2 = 0x0,
-    rxGain = 48,
-)
-
-cdef rlProfileCfg_t profileCfgArgs2=rlProfileCfg_t(
-    profileId = 2,
-    pfVcoSelect = 0x02,
-    pfCalLutUpdate = 0,
-    startFreqConst = 1435384036,   # 77GHz
-    freqSlopeConst = 1243,         # 60 MHz/us
-    idleTimeConst = 700,           # 7us
-    adcStartTimeConst = 600,       # 6us
-    rampEndTime = 6500,            # 65us
-    txOutPowerBackoffCode = 0x0,
-    txPhaseShifter = 0x0,
-    txStartTime = 0x0,
-    numAdcSamples = 256,
-    digOutSampleRate = 4400,
-    hpfCornerFreq1 = 0x0,
-    hpfCornerFreq2 = 0x0,
-    rxGain = 48,
-)
-
-"""! \brief
-* Frame config API parameters - PATCHED to match mimo.c's geometry (3 chirps,
-* 255 loops, 100ms periodicity), matching Cascade_Configuration_Capture_Ready2ArmTrigger.lua
-"""
-cdef rlFrameCfg_t frameCfgArgs=rlFrameCfg_t(
-    chirpStartIdx = 0,
-    chirpEndIdx = 2,                # PATCHED: was 11 (12-chirp scheme), now 3 chirps
-    numFrames = 0,                  # (0 for infinite)
-    numLoops = 255,                  # PATCHED: was 16, now 255 (matches nchirp_loops)
-    numAdcSamples = 2 * 256,        # Complex samples (for I and Q siganls)
-    frameTriggerDelay = 0x0,
-    framePeriodicity = 20000000,    # 100ms | 1LSB = 5ns
-)
-
-"""! \brief
-* Chirp config API parameters. This structure contains fine dithering to coarse profile
-* defined in \ref rlProfileCfg_t. It also includes the selection of Transmitter and
-* binary phase modulation for a chirp.\n
-* @note : One can define upto 512 unique chirps.These chirps need to be included in
-*         frame configuration structure \ref rlFrameCfg_t to create FMCW frame
-"""
-cdef rlChirpCfg_t chirpCfgArgs = rlChirpCfg_t(
-    chirpStartIdx = 0,
-    chirpEndIdx = 0,
-    profileId = 0,
-    txEnable = 0x00,
-    adcStartTimeVar = 0,
-    idleTimeVar = 0,
-    startFreqVar = 0,
-    freqSlopeVar = 0,
-)
-
-"""! \brief
-* Rx/Tx Channel Configuration
-"""
-cdef rlChanCfg_t channelCfgArgs = rlChanCfg_t(
-    rxChannelEn = 0x0F,      # Enable all 4 RX Channels
-    txChannelEn = 0x07,      # Enable all 3 TX Channels
-    cascading = 0x02,        # Slave
-)
-
-# Manual initialization to ensure correct values
+# Zero-initialized C structs - filled exclusively by mmw_set_config() from TOML.
+cdef rlProfileCfg_t profileCfgArgs0
+cdef rlProfileCfg_t profileCfgArgs1
+cdef rlProfileCfg_t profileCfgArgs2
+cdef rlFrameCfg_t frameCfgArgs
+cdef rlChirpCfg_t chirpCfgArgs
+cdef rlChanCfg_t channelCfgArgs
 cdef rlAdcOutCfg_t adcOutCfgArgs
-adcOutCfgArgs.fmt.b2AdcBits = 2           # 16-bit
-adcOutCfgArgs.fmt.b6Reserved0 = 0
-adcOutCfgArgs.fmt.b8FullScaleReducFctr = 0
-adcOutCfgArgs.fmt.b2AdcOutFmt = 1         # Complex
-adcOutCfgArgs.fmt.b14Reserved1 = 0
-adcOutCfgArgs.reserved0 = 0
-adcOutCfgArgs.reserved1 = 0
-
-"""! \brief
-* mmwave radar data format config
-"""
-cdef rlDevDataFmtCfg_t dataFmtCfgArgs = rlDevDataFmtCfg_t(
-    iqSwapSel = 0,           # I first
-    chInterleave = 0,        # Interleaved mode
-    rxChannelEn = 0xF,       # All RX antenna enabled
-    adcFmt = 1,              # Complex
-    adcBits = 2,             # 16-bit ADC
-)
-
-"""! \brief
-* Radar RF LDO bypass enable/disable configuration
-"""
-cdef rlRfLdoBypassCfg_t ldoCfgArgs = rlRfLdoBypassCfg_t(
-    ldoBypassEnable = 3,       # RF LDO disabled, PA LDO disabled
-    ioSupplyIndicator = 0,
-    supplyMonIrDrop = 0,
-)
-
-"""! \brief
-* Power saving mode configuration
-"""
-cdef rlLowPowerModeCfg_t lpmCfgArgs = rlLowPowerModeCfg_t(
-    lpAdcMode = 0,             # Regular ADC power mode
-)
-
-"""! \brief
-* Radar RF Miscconfiguration
-"""
-cdef rlRfMiscConf_t miscCfgArgs = rlRfMiscConf_t(
-    miscCtl = 1,               # Enable Per chirp phase shifter
-)
-
-"""! \brief
-* mmwave radar data path config.
-"""
-cdef rlDevDataPathCfg_t datapathCfgArgs = rlDevDataPathCfg_t(
-    intfSel = 0,               # CSI2 intrface
-    transferFmtPkt0 = 1,       # ADC data only
-    transferFmtPkt1 = 0,       # Suppress packet 1
-)
-
-"""! \brief
-* DataPath clock configuration
-"""
-cdef rlDevDataPathClkCfg_t datapathClkCfgArgs = rlDevDataPathClkCfg_t(
-    laneClkCfg = 1,            # DDR Clock
-    dataRate = 1,              # 600Mbps
-)
-
-"""! \brief
-* mmwave radar high speed clock configuration
-"""
-cdef rlDevHsiClk_t hsClkCfgArgs = rlDevHsiClk_t(
-    hsiClk = 0x09,             # DDR 600Mbps
-)
-
-"""! \brief
-* CSI2 configuration
-"""
-cdef rlDevCsi2Cfg_t csi2LaneCfgArgs = rlDevCsi2Cfg_t(
-    lineStartEndDis = 0,       # Enable
-    lanePosPolSel = 0x35421,   # 0b 0011 0101 0100 0010 0001,
-)
+cdef rlDevDataFmtCfg_t dataFmtCfgArgs
+cdef rlRfLdoBypassCfg_t ldoCfgArgs
+cdef rlLowPowerModeCfg_t lpmCfgArgs
+cdef rlRfMiscConf_t miscCfgArgs
+cdef rlDevDataPathCfg_t datapathCfgArgs
+cdef rlDevDataPathClkCfg_t datapathClkCfgArgs
+cdef rlDevHsiClk_t hsClkCfgArgs
+cdef rlDevCsi2Cfg_t csi2LaneCfgArgs
 
 """
 |-------|-------|-------|-------|-------|-------|-------|-------|-------|-------|-------|-------|-------|
@@ -441,60 +310,41 @@ cdef rlDevCsi2Cfg_t csi2LaneCfgArgs = rlDevCsi2Cfg_t(
 """
 
 
-cdef int8_t is_in_table(uint8_t value, uint8_t[:] table, uint8_t size):
-    '''@brief Check if a value is in the table provided in argument
-    #* @param value Value to look for in the table
-    #* @param table Table defining the search context
-    #* @param size Size of the table
-    #* @return int8_t
-    #* Return the index where the match has been found. -1 if not found
-    '''
-    cdef uint8_t i
-    for i in range(size):
-        if table[i] == value:
-            return i
-    return -1
-
-
 cpdef uint32_t configureMimoChirp(uint8_t devId, rlChirpCfg_t chirpCfg):
     """@brief MIMO Chirp configuration
     #* @param devId Device ID (0: master, 1: slave1, 2: slave2, 3: slave3)
     #* @param chirpCfg Initital chirp configuration
     #* @return uint32_t Configuration status
 
-    PATCHED TX table: matches mimo.c exactly - ONLY Dev4 (slave3, devId 3)
-    transmits, one TX antenna per chirp (TX0 on chirp0, TX1 on chirp1, TX2
-    on chirp2). Dev1/Dev2/Dev3 are 100% RX-only on every chirp (rows are all
-    0xFF, an invalid sentinel that never matches a real chirp index 0-2).
-
-    Original (unpatched) table implemented TI's full 12-chirp, 4-device MIMO
-    scheme where every device transmits on 3 of 12 chirps.
+    Antenna geometry (which TX antenna, if any, transmits on each chirp) and
+    the chirp->profile mapping are driven entirely by the module-level
+    _tx_antenna_table / _profile_id_per_chirp (see above) - populated from
+    config_dict["mimo"]["chirp"] (radar_configs/*.toml) by mmw_set_config().
+    _tx_antenna_table[devId][chirpIdx] is the TX antenna index to enable for
+    that device on that chirp, or -1 for RX-only (same indexing/semantics as
+    utility.export_config_to_json()'s txAntennaTable handling, so the
+    .mmwave.json sidecar always matches what actually got programmed).
     """
-    cdef uint8_t[4][3] chripTxTable=[
-        [0xFF, 0xFF, 0xFF],  # Dev1 - Master: RX only, never transmits
-        [0xFF, 0xFF, 0xFF],  # Dev2 - Slave1: RX only, never transmits
-        [0xFF, 0xFF, 0xFF],  # Dev3 - Slave2: RX only, never transmits
-        [0, 1, 2],           # Dev4 - Slave3: TX0/TX1/TX2 on chirp0/1/2
-    ]
-
     cdef int status = 0
-    cdef uint8_t i
-    cdef int8_t txIdx
+    cdef int i
+    cdef int8_t txAnt
+    dev_row = _tx_antenna_table[devId] if devId < len(_tx_antenna_table) else []
 
     for i in range(NUM_CHIRPS):
-        txIdx = is_in_table(i, chripTxTable[devId], 3)
+        txAnt = dev_row[i] if i < len(dev_row) else -1
 
         # Update chirp configuration
         chirpCfg.chirpStartIdx = i
         chirpCfg.chirpEndIdx = i
-        # PATCHED: select the profile matching this chirp index (chirp0->profile0
-        # with 175us idle, chirp1/2->profile1/2 with 7us idle) - same profile
-        # used across ALL devices for a given chirp index, matching mimo.c.
-        chirpCfg.profileId = i
-        if txIdx < 0:
+        # Select the profile matching this chirp index (per profileIdPerChirp
+        # - default chirp0->profile0 with 175us idle, chirp1/2->profile1/2
+        # with 7us idle) - same profile used across ALL devices for a given
+        # chirp index, matching mimo.c.
+        chirpCfg.profileId = _profile_id_per_chirp[i] if i < len(_profile_id_per_chirp) else i
+        if txAnt < 0:
             chirpCfg.txEnable = 0x00
         else:
-            chirpCfg.txEnable = (1 << txIdx)
+            chirpCfg.txEnable = (1 << txAnt)
 
         # Configure chirp and update status
         status += MMWL_chirpConfig(createDevMapFromDevId(devId), chirpCfg)
@@ -720,91 +570,222 @@ cdef uint32_t configure (devConfig_t config):
 
 cdef devConfig_t config
 
+
+def _require(section, key, section_name):
+    """Fetch section[key] or raise a clear ValueError naming the missing TOML key."""
+    if key not in section:
+        raise ValueError(
+            f"Radar config missing required field '{section_name}.{key}'. "
+            f"Add it to radar_configs/*.toml (see radar_configs/default.toml)."
+        )
+    return section[key]
+
+
+def _require_section(mimo, name):
+    """Fetch mimo[name] or raise naming the missing [mimo.<name>] TOML table."""
+    if name not in mimo:
+        raise ValueError(
+            f"Radar config missing required section [mimo.{name}]. "
+            f"Add it to radar_configs/*.toml (see radar_configs/default.toml)."
+        )
+    return mimo[name]
+
+
 cpdef mmw_set_config(dict configdict):
-    global config
+    """Apply a complete radar_configs/*.toml dict to the C structs the SDK uses.
+
+    Every field this function programs is REQUIRED. Missing keys raise
+    ValueError - there are no silent hardcoded fallbacks. Call this before
+    mmw_init().
+    """
+    global config, NUM_CHIRPS, _tx_antenna_table, _profile_id_per_chirp, _config_applied
+    cdef int pIdx
+    cdef dict mimo, profile, frame, channel, chirp, adc_out, low_power, misc, ldo, datapath
+
+    if "mimo" not in configdict:
+        raise ValueError(
+            "Radar config missing top-level 'mimo' table. "
+            "Pass a dict loaded from radar_configs/*.toml."
+        )
+    mimo = configdict["mimo"]
+
+    # Start from zeroed module-level structs (not RF defaults).
     config.deviceMap = 1|(1<<1)|(1<<2)|(1<<3)
     MMWL_AssignDeviceMap(config.deviceMap, &config.masterMap, &config.slavesMap)
     config.frameCfg = frameCfgArgs
-    config.profileCfg[0] = profileCfgArgs0  # PATCHED: 3 profiles instead of 1
+    config.profileCfg[0] = profileCfgArgs0
     config.profileCfg[1] = profileCfgArgs1
     config.profileCfg[2] = profileCfgArgs2
     config.chirpCfg = chirpCfgArgs
     config.channelCfg = channelCfgArgs
     config.csi2LaneCfg = csi2LaneCfgArgs
     config.datapathCfg = datapathCfgArgs
-    config.datapathClkCfg=datapathClkCfgArgs
+    config.datapathClkCfg = datapathClkCfgArgs
     config.hsClkCfg = hsClkCfgArgs
     config.ldoCfg = ldoCfgArgs
     config.lpmCfg = lpmCfgArgs
     config.miscCfg = miscCfgArgs
     config.adcOutCfg = adcOutCfgArgs
+    config.dataFmtCfg = dataFmtCfgArgs
 
-    cdef dict mimo,profile,frame,channel
-    if "mimo" in configdict:
-        mimo = configdict["mimo"]
-        if "profile" in mimo: # [PROFILE CONFIGURATION]
-            # Shared RF fields applied to all profile slots; idleTimes /
-            # pfVcoSelect / pfCalLutUpdate come from config_dict (same source
-            # as the .mmwave.json sidecar) when present.
-            profile = mimo["profile"]
-            for pIdx in range(3):
-                if "startFrequency" in profile: # Chirp start frequency in GHz
-                    config.profileCfg[pIdx].startFreqConst = <uint32_t>(ceil(profile["startFrequency"]*1e9/53.644)) # 1LSB = 53.644 Hz
-                if "frequencySlope" in profile: # Frequency slope in MHz/us
-                    config.profileCfg[pIdx].freqSlopeConst = <int16_t>(ceil(profile["frequencySlope"]*1e3/48.279)) # 1LSB = 48.279 kHz/us
-                if "adcStartTime" in profile:# ADC start time in us
-                    config.profileCfg[pIdx].adcStartTimeConst = <uint32_t>(ceil(profile["adcStartTime"]*1e2)) # 1LSB = 10ns
-                if "rampEndTime" in profile:# Chirp ramp end time in us
-                    config.profileCfg[pIdx].rampEndTime = <uint32_t>(ceil(profile["rampEndTime"]*1e2)) # 1LSB = 10ns
-                if "txStartTime" in profile:# TX starttime in us
-                    config.profileCfg[pIdx].txStartTime = <uint16_t>(ceil(profile["txStartTime"]*1e2)) # 1LSB = 10ns
-                if "numAdcSamples" in profile:# Number of ADC samples per chirp
-                    config.profileCfg[pIdx].numAdcSamples = <uint16_t>(profile["numAdcSamples"])
-                if "adcSamplingFrequency" in profile:# ADC sampling frequency in ksps
-                    config.profileCfg[pIdx].digOutSampleRate = <uint16_t>(profile["adcSamplingFrequency"])
-                if "rxGain" in profile:# rxGain in dB
-                    config.profileCfg[pIdx].rxGain = <uint16_t>(profile["rxGain"])
-                if "hpfCornerFreq1" in profile: # hpfCornerFreq1
-                    config.profileCfg[pIdx].hpfCornerFreq1 = <uint8_t>(profile["hpfCornerFreq1"])
-                if "hpfCornerFreq2" in profile: # hpfCornerFreq2
-                    config.profileCfg[pIdx].hpfCornerFreq2 = <uint8_t>(profile["hpfCornerFreq2"])
-                if "pfVcoSelect" in profile:
-                    config.profileCfg[pIdx].pfVcoSelect = <uint8_t>(profile["pfVcoSelect"])
-                if "pfCalLutUpdate" in profile:
-                    config.profileCfg[pIdx].pfCalLutUpdate = <uint8_t>(profile["pfCalLutUpdate"])
-            if "idleTimes" in profile:
-                idle_times = profile["idleTimes"]
-                for pIdx in range(min(3, len(idle_times))):
-                    # 1 LSB = 10ns -> value = us * 100
-                    config.profileCfg[pIdx].idleTimeConst = <uint32_t>(ceil(idle_times[pIdx] * 1e2))
+    # ── profile (required; applied to all 3 profile slots) ──────────────
+    profile = _require_section(mimo, "profile")
+    idle_times = _require(profile, "idleTimes", "mimo.profile")
+    if len(idle_times) != 3:
+        raise ValueError(
+            f"mimo.profile.idleTimes must have exactly 3 entries "
+            f"(one per profileCfg slot), got {len(idle_times)}"
+        )
+    for pIdx in range(3):
+        config.profileCfg[pIdx].profileId = <uint16_t>pIdx
+        config.profileCfg[pIdx].startFreqConst = <uint32_t>(ceil(
+            _require(profile, "startFrequency", "mimo.profile") * 1e9 / 53.644))
+        config.profileCfg[pIdx].freqSlopeConst = <int16_t>(ceil(
+            _require(profile, "frequencySlope", "mimo.profile") * 1e3 / 48.279))
+        config.profileCfg[pIdx].adcStartTimeConst = <uint32_t>(ceil(
+            _require(profile, "adcStartTime", "mimo.profile") * 1e2))
+        config.profileCfg[pIdx].rampEndTime = <uint32_t>(ceil(
+            _require(profile, "rampEndTime", "mimo.profile") * 1e2))
+        config.profileCfg[pIdx].txStartTime = <int16_t>(ceil(
+            _require(profile, "txStartTime", "mimo.profile") * 1e2))
+        config.profileCfg[pIdx].numAdcSamples = <uint16_t>(
+            _require(profile, "numAdcSamples", "mimo.profile"))
+        config.profileCfg[pIdx].digOutSampleRate = <uint16_t>(
+            _require(profile, "adcSamplingFrequency", "mimo.profile"))
+        config.profileCfg[pIdx].rxGain = <uint16_t>(
+            _require(profile, "rxGain", "mimo.profile"))
+        config.profileCfg[pIdx].hpfCornerFreq1 = <uint8_t>(
+            _require(profile, "hpfCornerFreq1", "mimo.profile"))
+        config.profileCfg[pIdx].hpfCornerFreq2 = <uint8_t>(
+            _require(profile, "hpfCornerFreq2", "mimo.profile"))
+        config.profileCfg[pIdx].pfVcoSelect = <uint8_t>(
+            _require(profile, "pfVcoSelect", "mimo.profile"))
+        config.profileCfg[pIdx].pfCalLutUpdate = <uint8_t>(
+            _require(profile, "pfCalLutUpdate", "mimo.profile"))
+        config.profileCfg[pIdx].txOutPowerBackoffCode = <uint32_t>(
+            _require(profile, "txOutPowerBackoffCode", "mimo.profile"))
+        config.profileCfg[pIdx].txPhaseShifter = <uint32_t>(
+            _require(profile, "txPhaseShifter", "mimo.profile"))
+        # 1 LSB = 10ns -> value = us * 100
+        config.profileCfg[pIdx].idleTimeConst = <uint32_t>(ceil(idle_times[pIdx] * 1e2))
 
-        if "frame" in mimo: # [FRAME CONFIGURATION]
-            frame = mimo["frame"]
-            if "numFrames" in frame: # Number of frames to record
-                config.frameCfg.numFrames = <uint16_t>(frame["numFrames"])
-            if "numLoops" in frame: # Number of chirp loop per frame
-                config.frameCfg.numLoops = <uint16_t>(frame["numLoops"])
-            if "framePeriodicity" in frame: # Frame periodicity in ms
-                config.frameCfg.framePeriodicity = <uint32_t>(ceil(frame["framePeriodicity"]*2e5)) # 1LSB = 5ns
-            if "chirpStartIdx" in frame:
-                config.frameCfg.chirpStartIdx = <uint16_t>(frame["chirpStartIdx"])
-            if "chirpEndIdx" in frame:
-                config.frameCfg.chirpEndIdx = <uint16_t>(frame["chirpEndIdx"])
-            if "frameTriggerDelay" in frame:
-                # Studio JSON uses usec float; SDK frameTriggerDelay is in 5ns LSB
-                config.frameCfg.frameTriggerDelay = <uint32_t>(ceil(float(frame["frameTriggerDelay"]) * 2e5))
-        if "channel" in mimo:# [CHANNEL CONFIGURATION]
-            channel = mimo["channel"]
-            if "rxChannelEn" in channel: # RX Channel configuration
-                config.channelCfg.rxChannelEn = <uint16_t>(channel["rxChannelEn"])
-            if "txChannelEn" in channel: # TX Channel configuration
-                config.channelCfg.txChannelEn = <uint16_t>(channel["txChannelEn"])
-        config.frameCfg.numAdcSamples = 2 * config.profileCfg[0].numAdcSamples
-        config.dataFmtCfg.rxChannelEn = config.channelCfg.rxChannelEn
-        
-    config.dataFmtCfg.rxChannelEn = channelCfgArgs.rxChannelEn
-    config.dataFmtCfg.adcBits = adcOutCfgArgs.fmt.b2AdcBits
-    config.dataFmtCfg.adcFmt = adcOutCfgArgs.fmt.b2AdcOutFmt
+    # ── frame ───────────────────────────────────────────────────────────
+    frame = _require_section(mimo, "frame")
+    config.frameCfg.numFrames = <uint16_t>(_require(frame, "numFrames", "mimo.frame"))
+    config.frameCfg.numLoops = <uint16_t>(_require(frame, "numLoops", "mimo.frame"))
+    config.frameCfg.framePeriodicity = <uint32_t>(ceil(
+        _require(frame, "framePeriodicity", "mimo.frame") * 2e5))  # 1LSB = 5ns
+    config.frameCfg.chirpStartIdx = <uint16_t>(_require(frame, "chirpStartIdx", "mimo.frame"))
+    config.frameCfg.chirpEndIdx = <uint16_t>(_require(frame, "chirpEndIdx", "mimo.frame"))
+    config.frameCfg.frameTriggerDelay = <uint32_t>(ceil(
+        float(_require(frame, "frameTriggerDelay", "mimo.frame")) * 2e5))
+    # triggerSelectMaster/Slave are consumed by .mmwave.json export only
+    # (frameCfg.triggerSelect is set per-device inside MMWL_frameConfig).
+    _require(frame, "triggerSelectMaster", "mimo.frame")
+    _require(frame, "triggerSelectSlave", "mimo.frame")
+
+    # ── channel ─────────────────────────────────────────────────────────
+    channel = _require_section(mimo, "channel")
+    config.channelCfg.rxChannelEn = <uint16_t>(_require(channel, "rxChannelEn", "mimo.channel"))
+    config.channelCfg.txChannelEn = <uint16_t>(_require(channel, "txChannelEn", "mimo.channel"))
+
+    # ── chirp / antenna geometry ────────────────────────────────────────
+    chirp = _require_section(mimo, "chirp")
+    NUM_CHIRPS = <int>(_require(chirp, "numChirps", "mimo.chirp"))
+    if NUM_CHIRPS <= 0:
+        raise ValueError("mimo.chirp.numChirps must be > 0")
+    _profile_id_per_chirp = list(_require(chirp, "profileIdPerChirp", "mimo.chirp"))
+    _tx_antenna_table = [list(row) for row in _require(chirp, "txAntennaTable", "mimo.chirp")]
+    if len(_profile_id_per_chirp) != NUM_CHIRPS:
+        raise ValueError(
+            f"mimo.chirp.profileIdPerChirp length ({len(_profile_id_per_chirp)}) "
+            f"must equal numChirps ({NUM_CHIRPS})"
+        )
+    if len(_tx_antenna_table) < 4:
+        raise ValueError(
+            f"mimo.chirp.txAntennaTable must have one row per device "
+            f"(need >= 4), got {len(_tx_antenna_table)}"
+        )
+    for row in _tx_antenna_table[:4]:
+        if len(row) != NUM_CHIRPS:
+            raise ValueError(
+                f"each mimo.chirp.txAntennaTable row must have numChirps "
+                f"({NUM_CHIRPS}) entries, got {len(row)}"
+            )
+    # Fine-dither vars: only 0.0 is supported today (encoding for non-zero
+    # is not wired). Keys are still required so a missing TOML field fails.
+    for _var_key in ("startFreqVar_MHz", "freqSlopeVar_KHz_usec",
+                     "idleTimeVar_usec", "adcStartTimeVar_usec"):
+        _var_val = _require(chirp, _var_key, "mimo.chirp")
+        if float(_var_val) != 0.0:
+            raise ValueError(
+                f"mimo.chirp.{_var_key}={_var_val}: non-zero chirp fine-dither "
+                f"vars are not yet supported (must be 0.0)"
+            )
+    config.chirpCfg.startFreqVar = 0
+    config.chirpCfg.freqSlopeVar = 0
+    config.chirpCfg.idleTimeVar = 0
+    config.chirpCfg.adcStartTimeVar = 0
+
+    # ── adcOut ──────────────────────────────────────────────────────────
+    adc_out = _require_section(mimo, "adcOut")
+    config.adcOutCfg.fmt.b2AdcBits = <uint32_t>(_require(adc_out, "adcBits", "mimo.adcOut"))
+    config.adcOutCfg.fmt.b8FullScaleReducFctr = <uint32_t>(
+        _require(adc_out, "fullScaleReducFctr", "mimo.adcOut"))
+    config.adcOutCfg.fmt.b2AdcOutFmt = <uint32_t>(_require(adc_out, "adcOutFmt", "mimo.adcOut"))
+
+    # ── lowPower / misc / ldo ───────────────────────────────────────────
+    low_power = _require_section(mimo, "lowPower")
+    config.lpmCfg.lpAdcMode = <uint16_t>(_require(low_power, "lpAdcMode", "mimo.lowPower"))
+
+    misc = _require_section(mimo, "misc")
+    config.miscCfg.miscCtl = <uint32_t>(_require(misc, "miscCtl", "mimo.misc"))
+
+    ldo = _require_section(mimo, "ldo")
+    config.ldoCfg.ldoBypassEnable = <uint16_t>(_require(ldo, "ldoBypassEnable", "mimo.ldo"))
+    config.ldoCfg.supplyMonIrDrop = <uint8_t>(_require(ldo, "supplyMonIrDrop", "mimo.ldo"))
+    config.ldoCfg.ioSupplyIndicator = <uint8_t>(_require(ldo, "ioSupplyIndicator", "mimo.ldo"))
+
+    # ── datapath / CSI2 / HSI clock ─────────────────────────────────────
+    datapath = _require_section(mimo, "datapath")
+    config.dataFmtCfg.iqSwapSel = <uint8_t>(_require(datapath, "iqSwapSel", "mimo.datapath"))
+    config.dataFmtCfg.chInterleave = <uint8_t>(_require(datapath, "chInterleave", "mimo.datapath"))
+    config.datapathCfg.intfSel = <uint8_t>(_require(datapath, "intfSel", "mimo.datapath"))
+    config.datapathCfg.transferFmtPkt0 = <uint8_t>(
+        _require(datapath, "transferFmtPkt0", "mimo.datapath"))
+    config.datapathCfg.transferFmtPkt1 = <uint8_t>(
+        _require(datapath, "transferFmtPkt1", "mimo.datapath"))
+    config.datapathCfg.cqConfig = <uint8_t>(_require(datapath, "cqConfig", "mimo.datapath"))
+    config.datapathCfg.cq0TransSize = <uint8_t>(
+        _require(datapath, "cq0TransSize", "mimo.datapath"))
+    config.datapathCfg.cq1TransSize = <uint8_t>(
+        _require(datapath, "cq1TransSize", "mimo.datapath"))
+    # cq2TransSize: required in TOML for documentation / .mmwave.json parity,
+    # but rlDevDataPathCfg_t has no matching field - not applied to the chip.
+    _require(datapath, "cq2TransSize", "mimo.datapath")
+    config.csi2LaneCfg.lineStartEndDis = <uint8_t>(
+        _require(datapath, "lineStartEndDis", "mimo.datapath"))
+    config.csi2LaneCfg.lanePosPolSel = <uint32_t>(
+        _require(datapath, "lanePosPolSel", "mimo.datapath"))
+    config.datapathClkCfg.laneClkCfg = <uint8_t>(
+        _require(datapath, "laneClkCfg", "mimo.datapath"))
+    rate_code, hsi_clk_code = _lookup_data_rate(
+        int(_require(datapath, "dataRate_Mbps", "mimo.datapath")),
+        int(config.datapathClkCfg.laneClkCfg),
+    )
+    config.datapathClkCfg.dataRate = <uint8_t>(rate_code)
+    config.hsClkCfg.hsiClk = <uint16_t>(hsi_clk_code)
+
+    # NOTE: mimo.rfInit.calibEnMask is intentionally NOT applied here -
+    # MMWL_rfInit() takes no calibEnMask parameter in this build. Optional
+    # in TOML; written to .mmwave.json for documentation only when present.
+
+    config.frameCfg.numAdcSamples = 2 * config.profileCfg[0].numAdcSamples
+    config.dataFmtCfg.rxChannelEn = config.channelCfg.rxChannelEn
+    config.dataFmtCfg.adcBits = config.adcOutCfg.fmt.b2AdcBits
+    config.dataFmtCfg.adcFmt = config.adcOutCfg.fmt.b2AdcOutFmt
+
+    _config_applied = True
     return 0
 
 cpdef int mmw_init(
@@ -813,6 +794,12 @@ cpdef int mmw_init(
     ):
     cdef int status = 0
     cdef bytes ip_addr_bytes = ip_addr.encode('utf-8')
+    if not _config_applied:
+        raise RuntimeError(
+            "mmw_set_config() must be called with a complete radar_configs/*.toml "
+            "dict before mmw_init() - C-struct defaults are zeroed and will not "
+            "program a working radar."
+        )
     status = MMWL_TDAInit(ip_addr_bytes,port,config.deviceMap)
     check(status,
         b"[MMWCAS-DSP] TDA Connected!",

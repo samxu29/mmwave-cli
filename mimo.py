@@ -1,22 +1,11 @@
 """
 mimo.py - TIDEP-01012 MIMO Cascade Radar Control (Python / mmwcas Cython wrapper)
 
-Radar geometry/chirp profiling/frame timing here are PATCHED to match mimo.c
-(the standalone C binary) exactly - both drive the same mmWaveLink SDK calls
-via mmwcas.pyx, and are kept in lockstep with
-Cascade_Configuration_Capture_Ready2ArmTrigger.lua:
-  - 3 chirps, single TX device (TX0/TX1/TX2 on chirp0/1/2), not the original
-    12-chirp/4-device MIMO scheme.
-  - 3 profiles with idle time 175us/7us/7us, pfVcoSelect=0x02 (VCO2), and
-    chirp TX geometry live in config_dict below (also written to .mmwave.json).
-  - 60 MHz/us slope, 65us ramp-end, 255 loops/frame, 100ms frame periodicity
-    (10 Hz frame rate).
-  - adcSamplingFrequency = 4400 ksps (2026-07-22: corrected from 8000 to match
-    the AWR1843 reference config's SAMPLE_RATE, lua_reference/mmMesh_1843_
-    distributed_v3_qm_radar0.lua). mimo.c / mmwcas.pyx cdef defaults still say
-    8000 in comments/structs but are fully overridden at runtime by this
-    dict's "adcSamplingFrequency" (see mmwcas.pyx mmw_set_config) - not
-    functionally stale, just cosmetically out of lockstep until next edit.
+RF/geometry configuration (chirp profiles, idle times, antenna geometry,
+frame timing) has moved OUT of this file and into radar_config.py
+(2026-07-22) - see that module's header for details and for how to add a new
+idle-time scheme or antenna geometry preset without editing this file. Select
+a non-default preset with --radar-config <name>.
 
 Two capture modes, both configure the radar ONCE then loop:
   - Default: automatic loop, driven by --num-loops/--inter-loop-time (used by
@@ -53,6 +42,7 @@ from utility import export_config_to_json
 from utility import check_captured_files
 from utility import signal_handler
 from utility import upload_files_to_tda
+from radar_config import RADAR_CONFIGS, get_radar_config
 import os
 
 try:
@@ -61,98 +51,11 @@ try:
 except ImportError:
     _HAS_GPIO = False
 
-# Single source of truth for RF/geometry programmed by mmwcas AND written into
-# the per-capture .mmwave.json sidecar. Do not hardcode parallel copies in the
-# JSON exporter - change values here (and rebuild mmwcas if Cython defaults
-# also need updating for fields not yet applied from this dict).
-config_dict = {
-    "mimo": {
-        "profile": {
-            "id": 0,
-            "startFrequency": 77,           # Chirp start frequency in GHz
-            "frequencySlope": 60,           # Frequency slope in MHz/us (mimo.c PATCHED value)
-            # Per-profile idle times (us) - profile0/1/2 for chirp0/1/2
-            "idleTimes": [175, 7, 7],
-            "adcStartTime": 6,              # ADC start time in us
-            "numAdcSamples": 256,           # Number of ADC samples per chirp
-            "adcSamplingFrequency": 4400,   # ADC sampling frequency in ksps (matches AWR1843 reference SAMPLE_RATE)
-            "rampEndTime": 65,              # Chirp ramp end time in us (mimo.c PATCHED value)
-            "rxGain": 48,                   # dB
-            "txStartTime": 0,               # TX starttime in us
-            "hpfCornerFreq1": 0,            # 0: 175kHz
-            "hpfCornerFreq2": 0,            # 0: 350kHz
-            # AWR2243: 0x02 = VCO2 (77-81 GHz) - matches mmwcas/mimo.c pfVcoSelect
-            "pfVcoSelect": 0x02,
-            "pfCalLutUpdate": 0x00,
-            "txOutPowerBackoffCode": 0x00,
-            "txPhaseShifter": 0x00,
-        },
-        "frame": {
-            "numLoops": 255,                # mimo.c PATCHED value (was 16)
-            "numFrames": 0,                 # Number of frames to record (0 = infinite)
-            "framePeriodicity": 100,        # ms - mimo.c PATCHED value (was 50; 10Hz frame rate)
-            "chirpStartIdx": 0,
-            "chirpEndIdx": 2,               # 3 chirps (0-2)
-            "frameTriggerDelay": 0.0,
-            "triggerSelectMaster": 1,       # software trigger
-            "triggerSelectSlave": 2,        # hardware sync from master
-        },
-        "channel": {
-            "rxChannelEn": 0x0F,            # Enable all 4 RX channels
-            "txChannelEn": 0x07,            # Enable all 3 TX channels
-        },
-        # Chirp geometry: per-device local TX antenna index per chirp (-1 = TX off).
-        # Matches mmwcas/mimo.c chripTxTable - only Dev4 (index 3) transmits.
-        "chirp": {
-            "numChirps": 3,
-            "profileIdPerChirp": [0, 1, 2],
-            "txAntennaTable": [
-                [-1, -1, -1],               # Dev1 master: RX only
-                [-1, -1, -1],               # Dev2 slave1: RX only
-                [-1, -1, -1],               # Dev3 slave2: RX only
-                [0, 1, 2],                  # Dev4 slave3: TX0/TX1/TX2 on chirp0/1/2
-            ],
-            "startFreqVar_MHz": 0.0,
-            "freqSlopeVar_KHz_usec": 0.0,
-            "idleTimeVar_usec": 0.0,
-            "adcStartTimeVar_usec": 0.0,
-        },
-        "rfInit": {
-            "calibEnMask": 0x1FF0,          # matches MMWL_rfInit / Studio boot cals
-        },
-        "adcOut": {
-            "adcBits": 2,                   # 16-bit
-            "fullScaleReducFctr": 0,
-            "adcOutFmt": 1,                 # complex
-        },
-        "lowPower": {
-            "lpAdcMode": 0,
-        },
-        "misc": {
-            "miscCtl": 1,                   # per-chirp phase shifter enable
-        },
-        "ldo": {
-            "ldoBypassEnable": 3,
-            "supplyMonIrDrop": 0,
-            "ioSupplyIndicator": 0,
-        },
-        "datapath": {
-            "iqSwapSel": 0,
-            "chInterleave": 0,
-            "intfSel": 0,                   # CSI2
-            "transferFmtPkt0": 1,
-            "transferFmtPkt1": 0,
-            "cqConfig": 0,
-            "cq0TransSize": 0,
-            "cq1TransSize": 0,
-            "cq2TransSize": 0,
-            "laneClkCfg": 1,
-            "dataRate_Mbps": 600,
-            "lanePosPolSel": 0x35421,
-            "lineStartEndDis": 0,
-        },
-    }
-}
+# RF/geometry config dict - selected from radar_config.RADAR_CONFIGS in
+# main() based on --radar-config (defaults to "default"). Set here so
+# run_one_capture() (which reads this module-level global) works whether
+# called from main()'s automatic loop or run_interactive().
+config_dict = get_radar_config("cascade_tx3_rx16")
 
 # Global flag for graceful shutdown
 shutdown_flag = False
@@ -334,12 +237,12 @@ def run_interactive(args):
 def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='TIDEP-01012 MIMO Cascade Radar Control IMRSL')
-    parser.add_argument('-d', '--directory', 
-                        type=str, 
+    parser.add_argument('-d', '--directory',
+                        type=str,
                         default='mmwave_python',
                         help='Base directory name for data capture (default: mmwave_python)')
-    parser.add_argument('-t', '--duration', 
-                        type=float, 
+    parser.add_argument('-t', '--duration',
+                        type=float,
                         default=10.0,
                         help='Recording duration in seconds (default: 10.0)')
     parser.add_argument('--tda-ip',
@@ -371,12 +274,18 @@ def main():
                         type=int,
                         default=200,
                         help='IR sensor software debounce window in ms (default: 200)')
+    parser.add_argument('--radar-config',
+                        type=str,
+                        default='default',
+                        choices=sorted(RADAR_CONFIGS),
+                        help='Named RF/geometry preset from radar_config.py to use for this run '
+                             "(default: 'default'). Add new presets there, not here.")
 
     args = parser.parse_args()
 
     # Register signal handler for Ctrl+C
     signal.signal(signal.SIGINT, signal_handler)
-    
+
     # Validate arguments
     if args.num_loops < 0:
         print("Error: --num-loops must be >= 0")
@@ -389,13 +298,18 @@ def main():
         print(f"Number of loops  : {'Infinite (until Ctrl+C)' if args.num_loops == 0 else args.num_loops}")
         if args.num_loops != 1:
             print(f"Inter-loop delay : {args.inter_loop_time} seconds")
-    
+
+    # Select the RF/geometry preset (see radar_config.py) for this run.
+    global config_dict
+    config_dict = get_radar_config(args.radar_config)
+    print(f"Radar config     : {args.radar_config}")
+
     # Configure radar
     status = mmwcas.mmw_set_config(config_dict)
     if status != 0:
         print(f"Configuration error: {status}")
         raise ValueError(f"mmw_set_config failed with status {status}")
-    
+
     # Initialize radar
     status = mmwcas.mmw_init()
     assert status == 0, ValueError("mmw_init failed")
@@ -427,11 +341,11 @@ def main():
             # Check if we should continue
             if not infinite_mode and loop_count >= args.num_loops:
                 break
-            
+
             if shutdown_flag:
                 print("\n Shutdown requested. Exiting capture loop...")
                 break
-            
+
             loop_count += 1
 
             print("\n" + "="*60)

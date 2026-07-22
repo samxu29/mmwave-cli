@@ -18,6 +18,8 @@ Automated pipeline for **Bridge Structural Health Monitoring** using a TIDEP-010
 ### Python dependencies (Raspberry Pi)
 ```bash
 pip install cython pyserial numpy scipy matplotlib
+pip install tomli  # only needed on Python < 3.11 (stdlib tomllib covers 3.11+);
+                   # used by radar_config.py to load radar_configs/*.toml
 ```
 
 ### Build the `mmwcas` Cython extension
@@ -79,6 +81,9 @@ python3 -c "import mmwcas; print('mmwcas OK')"
 ```
 mmwave-cli/                         ← this repo (runs on Raspberry Pi ~/mmwave-cli/)
 ├── mimo.py                         ← radar control: configure, arm, capture, stop
+├── radar_config.py                 ← loads RF/geometry presets from radar_configs/*.toml
+├── radar_configs/                  ← RF/geometry presets (TOML), select via --radar-config <name>
+│   └── default.toml
 ├── mimo.c / mimo.h                 ← standalone C binary (legacy/alternate path)
 ├── mmwcas.pyx / mmwcas.pyi         ← Cython wrapper — compiled to mmwcas.so (Python import)
 ├── setup.py                        ← build mmwcas Cython extension
