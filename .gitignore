@@ -2,6 +2,7 @@
 output/
 
 .vscode
+.venv
 
 # Generated documentation folder
 html/
@@ -18,4 +19,3 @@ mmwave
 __pycache__/
 /PostProc/*
 dashboard/telegraf/.env
-lua
