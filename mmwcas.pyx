@@ -809,17 +809,27 @@ cpdef int mmw_init(
     return status
 
 cpdef int mmw_reconfigure_frame_count(int num_frames):
-    """@brief Re-run ONLY the frame configuration RPC (MMWL_frameConfig) for
-    * master + slaves with an updated numFrames, leaving profile/chirp/RF-init/
-    * datapath untouched. This makes the RF chips themselves hard-stop after
-    * exactly num_frames frames, instead of relying on host-side wall-clock
-    * timing (time.sleep + mmw_stop_frame()) to cut the capture off - which is
-    * subject to RPC/network jitter and does not guarantee an exact frame count.
+    """@brief NOT USED by mimo.py - kept for reference/future investigation only.
     *
-    * Used by --interactive mode (mimo.py) so each prompt's frame count is
-    * applied to the actual chip config, not just the TDA arm/host wait,
-    * without paying the cost of a full mmw_init()/configure() (firmware
-    * re-download, RF re-init, etc.) between captures.
+    * Re-runs ONLY the frame configuration RPC (MMWL_frameConfig) for master +
+    * slaves with an updated numFrames, leaving profile/chirp/RF-init/datapath
+    * untouched. The intent was to make the RF chips themselves hard-stop after
+    * exactly num_frames frames (avoiding host-side wall-clock jitter), so
+    * --interactive mode's per-prompt frame count would be hardware-exact
+    * without paying the cost of a full mmw_init()/configure() between captures.
+    *
+    * REVERTED (2026-07-22): on real cascade hardware, calling this mid-session
+    * (right before mmw_arming_tda()/mmw_start_frame(), i.e. without the
+    * settle time the original one-shot configure() sequence provides)
+    * reliably wedged the RF chips - mmw_start_frame() failed on the very
+    * first post-reconfigure capture of a freshly started process (some
+    * devices left stuck in a "frame ongoing" state), after which every
+    * subsequent MMWL_frameConfig()/MMWL_StartFrame() call failed too
+    * (RL_RET_CODE_FRAME_IS_ONGOING = 83) until the process was restarted.
+    * mimo.py's run_one_capture() does not call this - frame length there is
+    * controlled purely by host wall-clock wait + mmw_stop_frame(), same as
+    * before this function existed. Do not re-wire it in without a settle
+    * delay AND real-hardware validation across many repeated calls.
     *
     * @num_frames Exact number of frames the chips should record (0 = infinite,
     *             same semantics as frame.numFrames in radar_configs/*.toml).
