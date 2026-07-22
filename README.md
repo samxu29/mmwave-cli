@@ -1,225 +1,379 @@
-# mmwave
+# mmwave-cli
 
-The MMWCAS-RF-EVM and MMWCAS-DSP-EVM boards from Texas Instruments (TI) are supported
-with the TI-provided software `mmwave studio`. As so, one needs a Windows OS and Matlab
-runtime engine to try out the millimeter wave radars and their capabilities.
+Linux driver and capture tools for the Texas Instruments **MMWCAS-RF-EVM**
+(4× AWR2243 cascade, 77 GHz) and **MMWCAS-DSP-EVM** (TDA2xx) boards.
 
-This tool is a Linux driver for the RF and DSP boards, to enable the recording of data
-from a Linux OS. As so, it can be built to run on embedded Linux devices such as
-Raspberry Pi or so.
+TI’s official path is Windows + mmWave Studio + MATLAB. This repo lets you
+configure the radar and record raw IF ADC data (`.bin`) from Linux —
+including Raspberry Pi.
 
-`mmwave` is based on the `mmwavelink` library and build out of the example source
-codes provided by TI.
+Two capture front-ends share the same hardware:
 
-**NOTE:**
-- Only MIMO Configuration with all the 04 radar chips is currently supported with this driver.
-- Only Ethernet connection to the board is currently supported.
+| Path | Entry point | Config | Typical use |
+|------|-------------|--------|-------------|
+| **Legacy C binary** | `./mmwave` (from `mimo.c`) | `config/*.toml` via `-f` / `--cfg` | Original CLI, simple record |
+| **Python / Cython** | `mimo.py` (+ optional `pipeline.py`) | `radar_configs/*.toml` via `--radar-config` | Current workflow: raw IF capture |
 
+**Notes**
+- Only Ethernet to the TDA is supported (default IP `192.168.33.180`, port `5001`).
+- Raw captures land on the TDA SSD at `/mnt/ssd/<capture_dir>/`.
+- For **raw IF `.bin` only**, use `mimo.py` (or `./mmwave`). You do not need
+  LoRa, PS monitoring, or the cloud stack in `pipeline.py`.
 
-## Installation
+---
 
-All the third-party libraries needed are already present in the repository.
-`mmwave` can then be installed as follows:
+## Hardware quick reference
+
+| Item | Value |
+|------|--------|
+| Radar | TIDEP-01012 — 4× AWR2243 |
+| TDA IP | `192.168.33.180` (static Ethernet) |
+| TDA data path | `/mnt/ssd/<capture_dir>/` |
+| SSH (from host) | `ssh -oHostKeyAlgorithms=+ssh-rsa -oPubkeyAcceptedAlgorithms=+ssh-rsa root@192.168.33.180` |
+
+---
+
+## Repository layout (relevant parts)
+
+```
+mmwave-cli/
+├── mimo.c / mimo.h          # Legacy C capture tool → builds ./mmwave
+├── makefile                 # make all / make build / make install
+├── config/                  # TOML presets for ./mmwave (C path)
+│   ├── short-range-cfg.toml
+│   └── ...
+├── mimo.py                  # Python capture (raw IF) — uses mmwcas + radar_configs/
+├── mmwcas.pyx               # Cython bridge to TI mmWaveLink (C structs zeroed;
+│                            #   all RF values come from TOML via mmw_set_config)
+├── radar_config.py          # Loads radar_configs/*.toml
+├── radar_configs/           # TOML presets for mimo.py / pipeline.py
+│   ├── cascade_tx3_rx16.toml   # default Python preset (3 TX chirps, Dev4 TX)
+│   └── cascade_mimo.toml       # TI full 12-chirp / 4-device MIMO (from Lua)
+├── pipeline.py              # Optional: capture → SCP → edge PS → LoRa
+├── utility.py               # SCP helpers, .mmwave.json export, etc.
+├── setup.py                 # Build mmwcas Cython extension
+└── ti/                      # TI SDK / firmware (do not modify casually)
+```
+
+---
+
+## 1. Legacy C binary (`./mmwave`)
+
+### Build
 
 ```bash
-    git clone <mmwave-repository-git-url>
-    cd mmwave
-    sudo make install # Build and install mmwave on the machine
+sudo apt install build-essential
+make all          # produces ./mmwave
+# or
+sudo make install # also copies to /usr/local/bin/mmwave
 ```
 
-## Usage
-
-You can first check if `mmwave` is properly installed by typing the `help` command.
+### Help
 
 ```bash
- mmwave -h
+./mmwave -h
 ```
 
-You shall the see a help menu similar to the one below.
-
-```txt
-usage: mmwave [-d] [-p] [-i] [-c] [-r] [-t] [-f] [-h] [-v]
-
-Configuration and control tool for TI MMWave cascade Evaluation Module
-
-options:
-    -d, --capture-dir              Name of the director where to store recordings on the DSP board 
-    -p, --port                     Port number the DSP board server app is listening on 
-    -i, --ip-addr                  IP Address of the MMWCAS DSP evaluation module 
-    -c, --configure                Configure the MMWCAS-RF-EVM board 
-    -r, --record                   Trigger data recording. This assumes that configuration is completed. 
-    -t, --time                     Indicate how long the recording should last in minutes. Default: 1 min 
-    -f, --cfg                      TOML Configuration file. Overwrite the default config when provided 
-    -h, --help                     Print CLI option help and exit. 
-    -v, --version                  Print program version and exit.
-```
-
-A default configuration is already implemented (as described below) and can be used.
-
-```yaml
-    ip: 192.168.33.180      # MMWCAS-DSP-EVM IP Address
-    port: 5001              # MMWCAS-DSP-EVM server port
-    time: 1                 # Recording time in min
-```
-
-If the DSP board has been reconfigured with another IP address, you can provide the new
-IP address in argument with the `--ip-addr` CLI option.
-
-## Recording data
-
-### Default config
-
-To record data, the typical command is:
+### Typical usage
 
 ```bash
-mmwave -d <directory> --configure --record --time <duriation-in-minute>
+# Configure + record (duration in MINUTES)
+./mmwave -d outdoor0 --configure --record --time 10
 
-# Exmaple
-mmwave -d outdoor0 --configure --record --time 10
+# With a TOML config from config/
+./mmwave -f config/short-range-cfg.toml --configure --record --time 2
+
+# Interactive: configure once, then type experiment names at the prompt
+./mmwave --configure --interactive -i 192.168.33.180
 ```
 
-With this command, the radar chips are configured with the default configuration
-implemented in the source code.
+### CLI options (C binary)
 
-```yaml
-# Default MIMO Configuration
-#
-#   - Max Range             : 80 m
-#   - Range resolution      : 30 cm
-#   - Max velocity          : 6.49 km/h
-#   - Range resolution      : 0.4 km/h
-#
+| Option | Description |
+|--------|-------------|
+| `-c` / `--configure` | Program the RF / cascade |
+| `-r` / `--record` | Arm TDA and record |
+| `-t` / `--time` | Duration in **minutes** (default `1`) |
+| `-d` / `--capture-dir` | Capture directory name on TDA SSD |
+| `-i` / `--ip-addr` | TDA IP (default `192.168.33.180`) |
+| `-p` / `--port` | TDA port (default `5001`) |
+| `-f` / `--cfg` | Path to a TOML file under `config/` |
+| `-I` / `--interactive` | Configure once, then prompt for capture names |
 
-profile:
-    id: 0
-    startFrequency: 77                      # GHz
-    frequencySlope: 15.0148                 # MHz/us
-    idleTime: 5                             # us
-    adcStartTime: 6                         # us
-    rampEndTime: 40                         # us
-    numAdcSamples: 256                      # ADC Samples per chirp
-    rxGain: 48                              # dB
+### C-path TOML (`config/*.toml`)
 
-frame:
-    numLoops: 16                            # Number of chirp loops per frame
-    numFrames: 0                            # Number of frames to record. 0: Infinte framing
-    framePeriodicity: 100                   # ms
+Used only by `./mmwave` / `mimo.c` (parsed by `toml/config.c`). Schema is the
+**simpler single-profile** form, for example:
 
-channel:
-    rxChannelEn: 0xF                        # RX Channels enabled
-    rxChannelEn: 0x7                        # TX Channel enabled
+```toml
+[mimo.profile]
+id = 0
+startFrequency = 77
+frequencySlope = 79.0327
+idleTime = 5
+adcStartTime = 6
+rampEndTime = 40
+numAdcSamples = 256
+adcSamplingFrequency = 8000
+rxGain = 48
 
-dataFmt:
-    iqSwapSel: 0                            # I first
+[mimo.frame]
+numFrames = 0
+numLoops = 16
+framePeriodicity = 100
+
+[mimo.channel]
+rxChannelEn = 15
+txChannelEn = 7
 ```
 
-If the capture directory is not indicated (with the `-d` option), the capture folder is
-automatically created as `MMW_Capture_<timestamp>`; with `<timesamp>` is placeholder for
-the Unix timestamp at which the command has been issued.
+Examples live in `config/`. If `-f` is omitted, hardcoded defaults inside
+`mimo.c` are used.
 
-### Self-defined configuration
+---
 
-It's possible to define custom configurations suitable for a given recording setup
-with TOML config files. Some examples of config files are present on the `config`
-folder of this repository.
+## 2. Python / Cython path (`mimo.py`)
 
-With a config file, one can use the command below:
+This is the recommended path for raw IF capture on Linux / Raspberry Pi.
+
+### Dependencies
 
 ```bash
-mmwave -f <path-to-config-file> --configure --record --time <duration-in-min>
-
-# Example
-mmwave -f config/short-range-cfg.toml --configure --record --time 2
+pip install cython numpy pyserial
+pip install tomli   # only needed on Python < 3.11 (stdlib tomllib on 3.11+)
 ```
 
-### Check and copy recorded data
-
-With the MMWCAS-DSP-EVM board, recordings are saved on its embedded Solid State
-Drive (SSD). To check that the recording has proceeded and is successful, you can
-log over `ssh` onto the DSP board as follows:
+### Build the `mmwcas` extension
 
 ```bash
-# Use the IP address of the DSP board
-ssh root@192.168.33.180
-
-cd /mnt/ssd
-
-ls -l
+make build-cython
+# or
+python3 setup.py build_ext --inplace
 ```
 
-In the list of folders, you can then check for the name of the folder holding the
-recorded data and make sure that it contains some data.
-
-To copy the files over Ethernet, one can use a secure copy program such as `scp`.
+Verify:
 
 ```bash
-scp root@192.168.33.180:/mnt/ssd/<recording-directory> <path-to-local-storage>
-
-# Example
-scp root@192.168.33.180:/mnt/ssd/outdoor0 /home/user/rwu-radar
+python3 -c "import mmwcas; print('mmwcas OK')"
 ```
 
-## Developer note
+Full clean rebuild of C binary + Cython:
 
-The structure of the repository is as follows:
-
-```txt
-.
-├── config
-│   └── short-range-cfg.toml
-├── makefile
-├── mimo.c
-├── mimo.h
-├── mmwave
-├── opt
-│   ├── opt.c
-│   └── opt.h
-├── README.md
-├── ti
-│   ├── ethernet
-│   │   ├── docs
-│   │   └── src
-│   ├── firmware
-│   │   ├── masterss
-│   │   ├── radarss
-│   │   ├── xwr22xx_metaImage.bin
-│   │   └── xwr22xx_metaImage.h
-│   ├── mmwave
-│   │   ├── crc_compute.c
-│   │   ├── mmwave.c
-│   │   ├── mmwave.h
-│   │   ├── rls_osi.c
-│   │   └── rls_osi.h
-│   └── mmwavelink
-│       ├── docs
-│       ├── include
-│       ├── lib
-│       ├── makefile
-│       ├── makefiles
-│       ├── mmwavelink.h
-│       └── src
-└── toml
-    ├── config.c
-    ├── config.h
-    ├── toml.c
-    └── toml.h
+```bash
+make build
 ```
 
-The content of the folders `ti/mmwavelink` and `ti/firmware` must not be modified. Those
-are respectively libraries and firmware provided by Texas Instruments and should not be
-modified unless one knows what it's all about. Any update to those can be directly obtained
-from TI or by copying them from the installation folder of `mmwave studio` and
-`mmwave dfp`.
+### What `mimo.py` does
 
-The folders `ti/ethernet` and `ti/mmwave` are based on examples source files provided by
-TI. Since the original sources were only compatible with windows, these have been modified
-to operate on Linux OS. One can update these modules to extend the capabilities of this driver.
+1. Loads a preset from `radar_configs/<name>.toml`
+2. Calls `mmwcas.mmw_set_config()` then `mmw_init()`
+3. Arms TDA → starts frames → sleeps `--duration` seconds → stops
+4. Writes `mmwave_json_files/<capture>.mmwave.json` and optionally IR timestamps
+5. Uploads those sidecars into `/mnt/ssd/<capture_dir>/` next to the raw `.bin`s
 
-- The folder `opt` holds the source handling the CLI option parsing
-- The `toml` folder handles the parsing of configuration files.
-- The entry point of the program is in the `mimo.c` file.
+It does **not** run edge processing or LoRa.
 
-**NOTE**: the files `toml/toml.c` and `toml/toml.h` have been authored by 
-[cktan](https://github.com/cktan) and released with an MIT license on Github at
-https://github.com/cktan/tomlc99. Therefore, this reference is the perfect place to
-seek for new updates of the `TOML` parser library.
+### Typical usage (raw IF only)
+
+```bash
+# 10 s capture, default radar preset (cascade_tx3_rx16)
+python3 mimo.py --duration 10 --directory my_capture
+
+# Explicit preset
+python3 mimo.py --duration 10 --directory my_capture --radar-config cascade_tx3_rx16
+
+# TI full 12-chirp MIMO (from Cascade_Configuration_MIMO.lua)
+python3 mimo.py --duration 10 --directory my_capture --radar-config cascade_mimo
+
+# Interactive naming (configure once, then type names at the prompt)
+python3 mimo.py --interactive --duration 10
+
+# Disable IR GPIO timestamps
+python3 mimo.py --duration 10 --no-ir
+```
+
+### CLI options (`mimo.py`)
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-d` / `--directory` | `mmwave_python` | Capture name prefix (timestamp appended) |
+| `-t` / `--duration` | `10` | Capture length in **seconds** |
+| `--tda-ip` | `192.168.33.180` | TDA IP |
+| `-n` / `--num-loops` | `1` | Loops (`0` = until Ctrl+C) |
+| `-i` / `--inter-loop-time` | `60` | Delay between loops (s) |
+| `-I` / `--interactive` | off | REPL capture names |
+| `--radar-config` | `cascade_tx3_rx16` | Preset name = `radar_configs/<name>.toml` |
+| `--no-ir` | off | Disable IR timestamp logging |
+| `--ir-pin` | `4` | BCM GPIO pin |
+| `--ir-bounce-ms` | `200` | Debounce (ms) |
+
+### Python-path TOML (`radar_configs/*.toml`)
+
+**This is the only RF/geometry source for `mimo.py`.**  
+`mmwcas.pyx` keeps zeroed C structs; missing TOML fields raise `ValueError`.
+
+Preset name = filename without `.toml`:
+
+| File | `--radar-config` | Meaning |
+|------|------------------|---------|
+| `radar_configs/cascade_tx3_rx16.toml` | `cascade_tx3_rx16` | **Default.** 3 chirps, Dev4 TX0/1/2, idle 175/7/7 µs, 4400 ksps, 255 loops, 100 ms frames |
+| `radar_configs/cascade_mimo.toml` | `cascade_mimo` | TI Lua MIMO: 12 chirps, all 4 devices TX, slope 79, 8000 ksps, 64 loops, 10 frames |
+
+#### Add a new preset
+
+```bash
+cp radar_configs/cascade_tx3_rx16.toml radar_configs/my_setup.toml
+# edit my_setup.toml
+python3 mimo.py --radar-config my_setup --duration 10
+```
+
+No Python edits required — files in `radar_configs/` are loaded automatically.
+
+#### Schema overview (required sections)
+
+```toml
+[mimo.profile]
+startFrequency = 77
+frequencySlope = 60
+idleTimes = [175, 7, 7]        # one idle time per profile slot (exactly 3)
+adcStartTime = 6
+numAdcSamples = 256
+adcSamplingFrequency = 4400
+rampEndTime = 65
+rxGain = 48
+# ... pfVcoSelect, HPF, backoff, etc.
+
+[mimo.frame]
+numLoops = 255
+numFrames = 0                  # 0 = infinite (stop via --duration)
+framePeriodicity = 100
+chirpStartIdx = 0
+chirpEndIdx = 2
+# ...
+
+[mimo.channel]
+rxChannelEn = 0x0F
+txChannelEn = 0x07
+
+[mimo.chirp]
+numChirps = 3
+profileIdPerChirp = [0, 1, 2]
+txAntennaTable = [             # per device, local TX index per chirp (-1 = off)
+    [-1, -1, -1],
+    [-1, -1, -1],
+    [-1, -1, -1],
+    [0, 1, 2],
+]
+# ...
+
+[mimo.adcOut]
+[mimo.lowPower]
+[mimo.misc]
+[mimo.ldo]
+[mimo.datapath]
+# see cascade_tx3_rx16.toml for every required field
+```
+
+`config/*.toml` (C) and `radar_configs/*.toml` (Python) are **different schemas** —
+do not mix them.
+
+---
+
+## 3. Optional: `pipeline.py`
+
+Orchestrates a longer monitoring loop. **Step 1 is a subprocess call to `mimo.py`.**
+
+```
+pipeline.py
+  ├─ Step 1  Capture          → runs mimo.py
+  ├─ Step 2  Transfer          → SCP TDA → ~/IoSAR-EdgeProcessing/PostProc/
+  ├─ Step 3  SLC images        → only with --debug
+  ├─ Step 4  PS monitoring    → vibration metrics (needs EdgeProcessing repo)
+  └─ Step 5  LoRa uplink      → Wio-E5 → TTN (optional cloud path)
+```
+
+### If you only want raw `.bin` on the Pi
+
+Prefer `mimo.py` alone, then SCP yourself. Or use pipeline with processing/LoRa skipped:
+
+```bash
+python3 pipeline.py --duration 10 --label my_capture \
+  --radar-config cascade_tx3_rx16 \
+  --skip-ps --skip-lora
+```
+
+### Full monitoring example (original SHM workflow)
+
+```bash
+python3 pipeline.py --duration 15 --label RPI_python_bridge \
+  --radar-config cascade_tx3_rx16
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `-t` / `--duration` | `10` | Seconds (passed to `mimo.py`) |
+| `--label` | `RPI_python` | Capture prefix |
+| `--tda-ip` | `192.168.33.180` | TDA IP |
+| `--radar-config` | `cascade_tx3_rx16` | Passed through to `mimo.py` |
+| `-i` / `--interval` | `0` | Wait between cycles (s) |
+| `--debug` | off | Also generate SLC / range-profile |
+| `--skip-transfer` | off | Skip SCP |
+| `--skip-ps` | off | Skip PS monitoring |
+| `--skip-lora` | off | Skip LoRa |
+| `--ps-file` | none | Manual PS JSON |
+
+LoRa / TTN / Grafana are for remote vibration dashboards. They are **not**
+required for raw IF capture.
+
+---
+
+## 4. Fetching raw data from the TDA
+
+```bash
+# List captures
+ssh -oHostKeyAlgorithms=+ssh-rsa -oPubkeyAcceptedAlgorithms=+ssh-rsa \
+  root@192.168.33.180 'ls -lh /mnt/ssd'
+
+# Copy one capture
+scp -O -oHostKeyAlgorithms=+ssh-rsa -oPubkeyAcceptedAlgorithms=+ssh-rsa \
+  -oStrictHostKeyChecking=no -r \
+  root@192.168.33.180:/mnt/ssd/<capture_dir> ./
+```
+
+Each capture directory contains raw ADC `.bin` files (and, when using `mimo.py`,
+the uploaded `.mmwave.json` / IR `.npy` sidecars).
+
+---
+
+## 5. Which tool should I use?
+
+| Goal | Use |
+|------|-----|
+| Raw IF `.bin` only (recommended) | `python3 mimo.py --duration … --radar-config …` |
+| Same, but legacy C CLI | `./mmwave -c -r -t … [-f config/….toml]` |
+| Capture + auto SCP + PS + LoRa | `python3 pipeline.py …` |
+| Capture + SCP only | `pipeline.py … --skip-ps --skip-lora` |
+
+---
+
+## 6. Config path cheat-sheet
+
+| Front-end | TOML location | Select how |
+|-----------|---------------|------------|
+| `./mmwave` | `config/*.toml` | `-f config/short-range-cfg.toml` |
+| `mimo.py` / `pipeline.py` | `radar_configs/*.toml` | `--radar-config cascade_tx3_rx16` |
+
+Built-in Python presets:
+
+- **`cascade_tx3_rx16`** — default; 3 TX chirps on Dev4, 16 RX virtual array style geometry used in current experiments  
+- **`cascade_mimo`** — full TI 12-chirp MIMO from `lua_reference/Cascade_Configuration_MIMO.lua`
+
+---
+
+## 7. Developer notes
+
+- Do not casually edit `ti/mmwavelink` or `ti/firmware` (TI-provided).
+- `ti/ethernet` and `ti/mmwave` are Linux ports of TI examples.
+- C TOML parser: `toml/` (tomlc99). Python TOML loader: `radar_config.py` (`tomllib` / `tomli`).
+- `mmwcas.pyx` must be rebuilt after Cython source changes: `make build-cython`.
+- Changing RF/geometry for the Python path: edit `radar_configs/*.toml` only — no `.pyx` rebuild needed for field value changes.

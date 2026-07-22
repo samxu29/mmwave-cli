@@ -1,0 +1,119 @@
+# radar_configs/cascade_mimo.toml
+# Reflects lua_reference/Cascade_Configuration_MIMO.lua (TI's original
+# 12-chirp / 4-device TDM-MIMO scheme).
+#
+# Select with:
+#   python3 mimo.py --radar-config cascade_mimo
+#   python3 pipeline.py --radar-config cascade_mimo
+#
+# Mapped from the Lua User Constants / Sensor Configuration block:
+#   start_freq=77, slope=79, idle_time=5, adc_start_time=6,
+#   adc_samples=256, sample_freq=8000, ramp_end_time=40, rx_gain=48
+#   start_chirp_tx=0, end_chirp_tx=11, nchirp_loops=64,
+#   nframes_master/slave=10, Inter_Frame_Interval=100, trig_list={1,2,2,2}
+#   Chirp TX enable table = TI's full 12-chirp MIMO (each of 4 devices
+#   transmits on 3 of 12 chirps).
+#
+# Sections not explicitly set in the Lua profile/frame/chirp block
+# (adcOut / ldo / datapath / CSI2 / etc.) match the values the same Lua
+# script programs via DataPathConfig_mult / LvdsClkConfig_mult /
+# RfLdoBypassConfig_mult / SetMiscConfig_mult / LPModConfig_mult, which
+# are the cascade EVM Studio defaults.
+#
+# NOTE: Lua uses a single profile (profileId=0). Our schema still requires
+# 3 idleTimes entries (mmwcas.pyx profileCfg[3] slots); slots 1/2 are
+# unused placeholders because every chirp maps to profile 0.
+#
+# NOTE: numFrames=10 matches the Lua script (finite capture). For
+# duration-controlled pipeline runs prefer numFrames=0 (infinite framing,
+# stopped by mimo.py's --duration), same convention as cascade_tx3_rx16.toml.
+
+[mimo.profile]
+id = 0
+startFrequency = 77             # Lua: start_freq (GHz)
+frequencySlope = 79             # Lua: slope (MHz/us)
+# Lua: idle_time=5 us on the single profile; all chirps use profile 0
+idleTimes = [5, 5, 5]
+adcStartTime = 6                # Lua: adc_start_time (us)
+numAdcSamples = 256             # Lua: adc_samples
+adcSamplingFrequency = 8000     # Lua: sample_freq (ksps)
+rampEndTime = 40                # Lua: ramp_end_time (us)
+rxGain = 48                     # Lua: rx_gain (dB)
+txStartTime = 0                 # Lua: txStartTimeUSec
+hpfCornerFreq1 = 0              # Lua: hpfCornerFreq1
+hpfCornerFreq2 = 0              # Lua: hpfCornerFreq2
+pfVcoSelect = 0x02              # AWR2243 VCO2 for 77 GHz band
+pfCalLutUpdate = 0x00
+txOutPowerBackoffCode = 0x00    # Lua: tx0/1/2OutPowerBackoffCode = 0
+txPhaseShifter = 0x00           # Lua: tx0/1/2PhaseShifter = 0
+
+[mimo.frame]
+numLoops = 64                   # Lua: nchirp_loops
+numFrames = 10                  # Lua: nframes_master / nframes_slave
+framePeriodicity = 100          # Lua: Inter_Frame_Interval (ms)
+chirpStartIdx = 0               # Lua: start_chirp_tx
+chirpEndIdx = 11                # Lua: end_chirp_tx (12 chirps, 0-11)
+frameTriggerDelay = 0.0         # Lua: trigger_delay (us)
+triggerSelectMaster = 1         # Lua: trig_list[1] = software
+triggerSelectSlave = 2          # Lua: trig_list[2/3/4] = hardware
+
+[mimo.channel]
+rxChannelEn = 0x0F              # Enable all 4 RX channels
+txChannelEn = 0x07              # Enable all 3 TX channels
+
+# Chirp geometry from Cascade_Configuration_MIMO.lua Configure_Chirps() /
+# the 12-chirp TX enable table in that file's header comment.
+# Per-device local TX antenna index per chirp (-1 = TX off).
+# Chirp:  0  1  2  3  4  5  6  7  8  9 10 11
+# Dev1:  -- -- -- -- -- -- -- -- -- T2 T1 T0
+# Dev2:  -- -- -- -- -- -- T2 T1 T0 -- -- --
+# Dev3:  -- -- -- T2 T1 T0 -- -- -- -- -- --
+# Dev4:  T2 T1 T0 -- -- -- -- -- -- -- -- --
+[mimo.chirp]
+numChirps = 12
+profileIdPerChirp = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+txAntennaTable = [
+    [-1, -1, -1, -1, -1, -1, -1, -1, -1,  2,  1,  0],  # Dev1 master
+    [-1, -1, -1, -1, -1, -1,  2,  1,  0, -1, -1, -1],  # Dev2 slave1
+    [-1, -1, -1,  2,  1,  0, -1, -1, -1, -1, -1, -1],  # Dev3 slave2
+    [ 2,  1,  0, -1, -1, -1, -1, -1, -1, -1, -1, -1],  # Dev4 slave3
+]
+startFreqVar_MHz = 0.0
+freqSlopeVar_KHz_usec = 0.0
+idleTimeVar_usec = 0.0
+adcStartTimeVar_usec = 0.0
+
+[mimo.rfInit]
+# Documentation-only in our Python path (MMWL_rfInit takes no calibEnMask).
+calibEnMask = 0x1FF0
+
+[mimo.adcOut]
+adcBits = 2                      # 16-bit
+fullScaleReducFctr = 0
+adcOutFmt = 1                    # complex
+
+[mimo.lowPower]
+lpAdcMode = 0                    # Lua: LPModConfig_mult(..., 0, 0)
+
+[mimo.misc]
+miscCtl = 1                      # Lua: SetMiscConfig_mult(..., 1, ...)
+
+[mimo.ldo]
+ldoBypassEnable = 3              # Lua: RfLdoBypassConfig_mult(..., 3)
+supplyMonIrDrop = 0
+ioSupplyIndicator = 0
+
+[mimo.datapath]
+iqSwapSel = 0
+chInterleave = 0
+intfSel = 0                      # Lua: DataPathConfig_mult(..., 0, 1, 0) CSI2
+transferFmtPkt0 = 1
+transferFmtPkt1 = 0
+cqConfig = 0
+cq0TransSize = 0
+cq1TransSize = 0
+cq2TransSize = 0                 # documentation-only
+laneClkCfg = 1                   # Lua: LvdsClkConfig_mult(..., 1, 1) DDR
+dataRate_Mbps = 600              # Lua: dataRate code 1 = 600 Mbps
+lanePosPolSel = 0x35421          # cascade EVM CSI2 lane map (same as Studio default)
+lineStartEndDis = 0

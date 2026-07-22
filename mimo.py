@@ -42,7 +42,7 @@ from utility import export_config_to_json
 from utility import check_captured_files
 from utility import signal_handler
 from utility import upload_files_to_tda
-from radar_config import RADAR_CONFIGS, get_radar_config
+from radar_config import RADAR_CONFIGS, DEFAULT_RADAR_CONFIG, get_radar_config
 import os
 
 try:
@@ -52,10 +52,10 @@ except ImportError:
     _HAS_GPIO = False
 
 # RF/geometry config dict - selected from radar_config.RADAR_CONFIGS in
-# main() based on --radar-config (defaults to "default"). Set here so
+# main() based on --radar-config (defaults to cascade_tx3_rx16). Set here so
 # run_one_capture() (which reads this module-level global) works whether
 # called from main()'s automatic loop or run_interactive().
-config_dict = get_radar_config("cascade_tx3_rx16")
+config_dict = get_radar_config(DEFAULT_RADAR_CONFIG)
 
 # Global flag for graceful shutdown
 shutdown_flag = False
@@ -276,10 +276,11 @@ def main():
                         help='IR sensor software debounce window in ms (default: 200)')
     parser.add_argument('--radar-config',
                         type=str,
-                        default='default',
+                        default=DEFAULT_RADAR_CONFIG,
                         choices=sorted(RADAR_CONFIGS),
-                        help='Named RF/geometry preset from radar_config.py to use for this run '
-                             "(default: 'default'). Add new presets there, not here.")
+                        help='Named RF/geometry preset from radar_configs/*.toml '
+                             f"(default: '{DEFAULT_RADAR_CONFIG}'). "
+                             'Add new presets as .toml files there, not here.')
 
     args = parser.parse_args()
 
