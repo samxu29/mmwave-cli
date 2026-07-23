@@ -105,6 +105,30 @@ def _expected_bytes_per_frame_for_device(cfg, dev_id):
         return None
 
 
+def _frame_active_time_us(cfg):
+    """
+    Total time the radar spends chirping in ONE frame, in microseconds:
+
+        active = numLoops × Σ_chirps (idleTime[profile] + rampEndTime)
+
+    This must fit inside framePeriodicity (ms) or the device can't honour the
+    frame trigger and SKIPS frames (RF frame overrun) - a data-rate-independent
+    drop cause. Returns None if fields are missing/unparseable.
+    """
+    try:
+        prof = cfg["mimo"]["profile"]
+        frame = cfg["mimo"]["frame"]
+        chirp = cfg["mimo"]["chirp"]
+        idle_times = prof["idleTimes"]
+        ramp = float(prof["rampEndTime"])
+        num_loops = int(frame["numLoops"])
+        pids = chirp["profileIdPerChirp"]
+        per_loop = sum(float(idle_times[int(pid)]) + ramp for pid in pids)
+        return per_loop * num_loops
+    except (KeyError, TypeError, ValueError, IndexError):
+        return None
+
+
 def _dev_id_from_data_bin(name):
     """Parse leading device index from e.g. 'master_0000_data.bin' /
     'slave1_0000_data.bin' / '0_0000_data.bin'. Returns None if unknown."""
@@ -128,12 +152,15 @@ def _warn_on_frame_drops(files, num_frames, cfg):
     """
     Cross-check on-disk <dev>_0000_data.bin sizes against the requested frame
     count and print a prominent WARNING if the TDA wrote FEWER frames than
-    requested. A short capture means the TDA dropped frames because the
-    capture data rate exceeded what the SSD/LVDS write path could sustain -
-    NOT wall-clock jitter (which is bounded to +/-1 frame). Each device file
-    is checked independently (per-device RX masks supported). Best-effort:
-    silently returns if the per-frame size can't be derived from cfg or no
-    data files are present.
+    requested (dropped frames, not wall-clock jitter which is bounded to +/-1
+    frame). When frames are missing, also report the chirp-schedule duty cycle
+    and diagnose the likely cause: on this hardware the dominant cause is RF
+    FRAME OVERRUN (chirp schedule nearly fills framePeriodicity), not TDA->SSD
+    bandwidth - proven by the fact that halving the data rate (fewer RX) left
+    the drop rate unchanged, while the only low-duty-cycle preset
+    (cascade_mimo) stopped dropping. Each device file is checked independently
+    (per-device RX masks supported). Best-effort: silently returns if the
+    per-frame size can't be derived from cfg or no data files are present.
 
     Returns the number of dropped frames (max across device files, 0 if none).
     """
@@ -184,11 +211,40 @@ def _warn_on_frame_drops(files, num_frames, cfg):
     if max_dropped > 0:
         print(f"\n  ** WARNING: {max_dropped} frame(s) short of the requested "
               f"{num_frames}. **")
-        print(f"     The TDA dropped frames - capture data rate exceeded the "
-              f"SSD/LVDS write")
-        print(f"     throughput. Reduce the data rate (lower numLoops / fewer "
-              f"chirps / lower")
-        print(f"     fps / 12-bit packing) if you need every frame.")
+        # Diagnose cause from the chirp schedule duty cycle. Empirically the
+        # dominant drop cause on this hardware is RF frame overrun (chirp
+        # schedule nearly fills framePeriodicity), NOT TDA->SSD bandwidth:
+        # halving the data rate (fewer RX) left the drop rate unchanged, while
+        # only the low-duty-cycle preset (cascade_mimo) stopped dropping.
+        active_us = _frame_active_time_us(cfg)
+        try:
+            period_ms = float(cfg["mimo"]["frame"]["framePeriodicity"])
+        except (KeyError, TypeError, ValueError):
+            period_ms = None
+        if active_us is not None and period_ms:
+            active_ms = active_us / 1000.0
+            duty = active_ms / period_ms * 100.0
+            print(f"     Chirp schedule: {active_ms:.1f} ms active per "
+                  f"{period_ms:.0f} ms frame ({duty:.0f}% duty, "
+                  f"{period_ms - active_ms:.1f} ms idle).")
+            if duty >= 90.0:
+                print(f"     -> Almost certainly RF FRAME OVERRUN: the schedule "
+                      f"nearly fills (or")
+                print(f"        exceeds) framePeriodicity, so the device skips "
+                      f"frames. This is NOT")
+                print(f"        a bandwidth problem. Fix: raise framePeriodicity, "
+                      f"or shorten the")
+                print(f"        schedule (smaller idleTimes / rampEndTime / "
+                      f"numLoops).")
+            else:
+                print(f"     -> Schedule has headroom, so this is more likely a "
+                      f"TDA->SSD throughput")
+                print(f"        hiccup. Reduce the data rate (numLoops / RX / "
+                      f"ADC samples / fps).")
+        else:
+            print(f"     Check the chirp schedule vs framePeriodicity (frame "
+                  f"overrun) first, then")
+            print(f"     the TDA->SSD data rate.")
     elif any_sized:
         print(f"\n  OK: all RX-enabled device files contain the full "
               f"{num_frames} frame(s).")
