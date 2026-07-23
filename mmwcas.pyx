@@ -690,8 +690,9 @@ cpdef mmw_set_config(dict configdict):
 
     # ── channel ─────────────────────────────────────────────────────────
     # rxChannelEn: scalar (broadcast to all 4 devices) OR length-4 list
-    # [Dev1, Dev2, Dev3, Dev4]. 0x00 is allowed (RX off on that device) -
-    # mmWave Studio requires >=1 RX per device, but mmWaveLink/TDA does not.
+    # [Dev1, Dev2, Dev3, Dev4]. Each entry must be non-zero: stock TDA
+    # capture computes width from RX popcount and CreateApp times out (-8)
+    # if any enabled device has width=0.
     channel = _require_section(mimo, "channel")
     rx_raw = _require(channel, "rxChannelEn", "mimo.channel")
     if isinstance(rx_raw, (list, tuple)):
@@ -704,6 +705,14 @@ cpdef mmw_set_config(dict configdict):
     else:
         _rx_v = int(rx_raw)
         _rx_channel_en_table = [_rx_v, _rx_v, _rx_v, _rx_v]
+    for _dev_i, _rx_mask in enumerate(_rx_channel_en_table):
+        if int(_rx_mask) == 0:
+            raise ValueError(
+                f"mimo.channel.rxChannelEn[{_dev_i}]=0x0: TDA capture requires "
+                f">=1 RX on every enabled device (width=0 -> CreateApp timeout "
+                f"status -8). Use e.g. 0x01 minimum, or drop that device from "
+                f"the TDA capture-card setup."
+            )
     config.channelCfg.rxChannelEn = <uint16_t>_rx_channel_en_table[0]
     config.channelCfg.txChannelEn = <uint16_t>(_require(channel, "txChannelEn", "mimo.channel"))
 
