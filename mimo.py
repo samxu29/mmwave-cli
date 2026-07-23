@@ -63,6 +63,138 @@ def _wait_s_for_frames(num_frames, period_s):
     """Host wait after start_frame: N periods + one period margin for TDA flush."""
     return num_frames * period_s + period_s
 
+
+def _rx_popcount_per_device(cfg):
+    """Return [nRx0, nRx1, nRx2, nRx3] from mimo.channel.rxChannelEn
+    (scalar broadcasts to all four devices; list is per-device)."""
+    rx = cfg["mimo"]["channel"]["rxChannelEn"]
+    if isinstance(rx, (list, tuple)):
+        return [bin(int(x)).count("1") for x in rx]
+    n = bin(int(rx)).count("1")
+    return [n, n, n, n]
+
+
+def _expected_bytes_per_frame_for_device(cfg, dev_id):
+    """
+    On-disk bytes for ONE frame in a single device's <dev>_0000_data.bin, for
+    16-bit complex ADC (the only layout this tool writes - TDA dataPacking is
+    hard-coded 0 = 16-bit in mmw_arming_tda()).
+
+        bytes/frame/device =
+            numAdcSamples × chirpsPerLoop × numLoops × numRxOnThisDevice
+            × 2 (I+Q) × 2 (bytes per 16-bit sample)
+
+    chirpsPerLoop = chirpEndIdx - chirpStartIdx + 1. numRxOnThisDevice is the
+    popcount of that device's rxChannelEn (supports per-device lists). Returns
+    0 when that device has RX disabled; None if fields are missing/unparseable
+    (frame-drop check is then silently skipped).
+    """
+    try:
+        prof = cfg["mimo"]["profile"]
+        frame = cfg["mimo"]["frame"]
+        num_adc = int(prof["numAdcSamples"])
+        num_loops = int(frame["numLoops"])
+        chirps_per_loop = int(frame["chirpEndIdx"]) - int(frame["chirpStartIdx"]) + 1
+        num_rx = _rx_popcount_per_device(cfg)[dev_id]
+        if num_adc <= 0 or num_loops <= 0 or chirps_per_loop <= 0:
+            return None
+        if num_rx <= 0:
+            return 0
+        return num_adc * chirps_per_loop * num_loops * num_rx * 2 * 2
+    except (KeyError, TypeError, ValueError, IndexError):
+        return None
+
+
+def _dev_id_from_data_bin(name):
+    """Parse leading device index from e.g. 'master_0000_data.bin' /
+    'slave1_0000_data.bin' / '0_0000_data.bin'. Returns None if unknown."""
+    base = str(name).split("/")[-1].lower()
+    if base.startswith("master"):
+        return 0
+    if base.startswith("slave1") or base.startswith("slave_1"):
+        return 1
+    if base.startswith("slave2") or base.startswith("slave_2"):
+        return 2
+    if base.startswith("slave3") or base.startswith("slave_3"):
+        return 3
+    # Numeric prefix used by some TDA layouts: '0_0000_data.bin'
+    head = base.split("_", 1)[0]
+    if head.isdigit():
+        return int(head)
+    return None
+
+
+def _warn_on_frame_drops(files, num_frames, cfg):
+    """
+    Cross-check on-disk <dev>_0000_data.bin sizes against the requested frame
+    count and print a prominent WARNING if the TDA wrote FEWER frames than
+    requested. A short capture means the TDA dropped frames because the
+    capture data rate exceeded what the SSD/LVDS write path could sustain -
+    NOT wall-clock jitter (which is bounded to +/-1 frame). Each device file
+    is checked independently (per-device RX masks supported). Best-effort:
+    silently returns if the per-frame size can't be derived from cfg or no
+    data files are present.
+
+    Returns the number of dropped frames (max across device files, 0 if none).
+    """
+    data_files = [(name, int(size)) for name, size in files
+                  if name.endswith("_data.bin") and str(size).isdigit()]
+    if not data_files:
+        return 0
+
+    max_dropped = 0
+    lines = []
+    any_sized = False
+    for name, size in sorted(data_files):
+        dev_id = _dev_id_from_data_bin(name)
+        bpf = (_expected_bytes_per_frame_for_device(cfg, dev_id)
+               if dev_id is not None else None)
+        if bpf is None:
+            # Fall back: try master mask if name is unrecognised.
+            bpf = _expected_bytes_per_frame_for_device(cfg, 0)
+        if bpf is None:
+            continue
+        if bpf == 0:
+            lines.append(f"    {name:28s}  RX disabled (expect ~0 bytes, "
+                         f"got {size})")
+            continue
+        any_sized = True
+        whole = size // bpf
+        partial = (size % bpf) != 0
+        dropped = num_frames - whole
+        if dropped > 0:
+            max_dropped = max(max_dropped, dropped)
+        note = ""
+        if dropped > 0:
+            note = f"   <-- {dropped} dropped ({dropped / num_frames * 100:.1f}%)"
+        elif partial:
+            note = "   <-- trailing partial frame"
+        lines.append(f"    {name:28s} {whole:>5d} frame(s)"
+                     + ("+partial" if partial else "        ") + note)
+
+    if not lines:
+        return 0
+
+    print(f"\n{'-'*60}")
+    print(f"Frame integrity check  (requested {num_frames} frame(s); "
+          f"bytes/frame varies by device RX mask)")
+    print(f"{'-'*60}")
+    for ln in lines:
+        print(ln)
+    if max_dropped > 0:
+        print(f"\n  ** WARNING: {max_dropped} frame(s) short of the requested "
+              f"{num_frames}. **")
+        print(f"     The TDA dropped frames - capture data rate exceeded the "
+              f"SSD/LVDS write")
+        print(f"     throughput. Reduce the data rate (lower numLoops / fewer "
+              f"chirps / lower")
+        print(f"     fps / 12-bit packing) if you need every frame.")
+    elif any_sized:
+        print(f"\n  OK: all RX-enabled device files contain the full "
+              f"{num_frames} frame(s).")
+    print(f"{'-'*60}")
+    return max_dropped
+
 try:
     import RPi.GPIO as GPIO
     _HAS_GPIO = True
@@ -222,6 +354,11 @@ def run_one_capture(exp_label, num_frames, tda_ip):
         print("\n  WARNING: No files found in capture directory!")
         print("\n  Skipping .mmwave.json generation.")
         return status, capture_dir
+
+    # Compare on-disk frame count vs. requested and warn on dropped frames
+    # (TDA/SSD couldn't keep up). Does not fail the capture - the data is
+    # still usable, just shorter than asked for.
+    _warn_on_frame_drops(files, num_frames, config_dict)
 
     # Generate configuration JSON file only if capture was successful
     json_filename = os.path.join("mmwave_json_files", f"{capture_dir}.mmwave.json")

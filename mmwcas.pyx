@@ -174,6 +174,11 @@ cdef int DEV_ENV = 1
 cdef int NUM_CHIRPS = 0
 _tx_antenna_table = []
 _profile_id_per_chirp = []
+# Per-device RX enable masks (Dev1..Dev4). Populated by mmw_set_config() from
+# mimo.channel.rxChannelEn - either a scalar (broadcast to all 4) or a length-4
+# list. Used by channelConfig / dataFmtConfig / frameConfig so devices can have
+# different RX counts (e.g. Dev2/Dev3 off -> 8 virtual RX from Dev1+Dev4).
+_rx_channel_en_table = [0x0F, 0x0F, 0x0F, 0x0F]
 _config_applied = False   # True after a successful mmw_set_config() call
 
 # Mbps -> rlDevDataPathClkCfg_t.dataRate field code (rl_device.h). DDR-only
@@ -400,6 +405,7 @@ cdef int32_t initMaster(rlChanCfg_t channelCfg,rlAdcOutCfg_t adcOutCfg):
     cdef unsigned int masterMap = 1U << masterId
     cdef int status = 0
     channelCfg.cascading = 1
+    channelCfg.rxChannelEn = <uint16_t>int(_rx_channel_en_table[0])
     status += MMWL_DevicePowerUp(masterMap, 1000, 1000)
     check(status,
         b"[MASTER] Power up successful!",
@@ -467,10 +473,14 @@ cdef int32_t initSlaves(rlChanCfg_t channelCfg, rlAdcOutCfg_t adcOutCfg):
         b"[SLAVE] RF successfully enabled!",
         b"[SLAVE] Error: Failed to enable master RF", slavesMap, TRUE)
 
-    status += MMWL_channelConfig(slavesMap, channelCfg.cascading,channelCfg)
-    check(status,
-        b"[SLAVE] Channels successfully configured!",
-        b"[SLAVE] Error: Channels configuration failed!", slavesMap, TRUE)
+    # Per-device RX mask (slaves may differ, e.g. Dev2/Dev3 RX off).
+    for slaveId in range(1, 4):
+        slaveMap = 1 << slaveId
+        channelCfg.rxChannelEn = <uint16_t>int(_rx_channel_en_table[slaveId])
+        status += MMWL_channelConfig(slaveMap, channelCfg.cascading, channelCfg)
+        check(status,
+            b"[SLAVE] Channels successfully configured!",
+            b"[SLAVE] Error: Channels configuration failed!", slaveMap, TRUE)
 
     status += MMWL_adcOutConfig(slavesMap, adcOutCfg)
     check(status,
@@ -498,7 +508,10 @@ cdef uint32_t configure (devConfig_t config):
         b"[ALL] LDO Bypass configuration successful!",
         b"[ALL] LDO Bypass configuration failed!", config.deviceMap, TRUE)
 
-    status += MMWL_dataFmtConfig(config.deviceMap, config.dataFmtCfg)
+    # Per-device dataFmt.rxChannelEn (must match channelCfg for TDA width calc).
+    for devId in range(4):
+        config.dataFmtCfg.rxChannelEn = <uint16_t>int(_rx_channel_en_table[devId])
+        status += MMWL_dataFmtConfig(1 << devId, config.dataFmtCfg)
     check(status,
         b"[ALL] Data format configuration successful!",
         b"[ALL] Data format configuration failed!", config.deviceMap, TRUE)
@@ -539,32 +552,22 @@ cdef uint32_t configure (devConfig_t config):
         b"[ALL] Chirp configuration successful!",
         b"[ALL] Chirp configuration failed!", config.deviceMap, TRUE)
 
-    #Master frame config.
-    status += MMWL_frameConfig(
-        config.masterMap,
-        config.frameCfg,
-        config.channelCfg,
-        config.adcOutCfg,
-        config.datapathCfg,
-        config.profileCfg[0]   # PATCHED: array now; [0] fine since only
-                                # numAdcSamples is used here, identical across profiles
-    )
-    check(status,
-        b"[MASTER] Frame configuration completed!",
-        b"[MASTER] Frame configuration failed!", config.masterMap, TRUE)
-
-    #Slaves frame config
-    status += MMWL_frameConfig(
-        config.slavesMap,
-        config.frameCfg,
-        config.channelCfg,
-        config.adcOutCfg,  
-        config.datapathCfg,
-        config.profileCfg[0]   # PATCHED: array now; [0] fine, see note above
-    )
-    check(status,
-        b"[SLAVE] Frame configuration completed!",
-        b"[SLAVE] Frame configuration failed!", config.slavesMap, TRUE)
+    # Per-device frame config so TDA width uses each device's RX popcount
+    # (MMWL_frameConfig also sets software vs hardware trigger from deviceMap).
+    for devId in range(4):
+        config.channelCfg.rxChannelEn = <uint16_t>int(_rx_channel_en_table[devId])
+        status += MMWL_frameConfig(
+            1 << devId,
+            config.frameCfg,
+            config.channelCfg,
+            config.adcOutCfg,
+            config.datapathCfg,
+            config.profileCfg[0]   # PATCHED: array now; [0] fine since only
+                                    # numAdcSamples is used here, identical across profiles
+        )
+        check(status,
+            b"[DEV] Frame configuration completed!",
+            b"[DEV] Frame configuration failed!", 1 << devId, TRUE)
 
     return status
 
@@ -598,7 +601,8 @@ cpdef mmw_set_config(dict configdict):
     ValueError - there are no silent hardcoded fallbacks. Call this before
     mmw_init().
     """
-    global config, NUM_CHIRPS, _tx_antenna_table, _profile_id_per_chirp, _config_applied
+    global config, NUM_CHIRPS, _tx_antenna_table, _profile_id_per_chirp
+    global _rx_channel_en_table, _config_applied
     cdef int pIdx
     cdef dict mimo, profile, frame, channel, chirp, adc_out, low_power, misc, ldo, datapath
 
@@ -685,8 +689,22 @@ cpdef mmw_set_config(dict configdict):
     _require(frame, "triggerSelectSlave", "mimo.frame")
 
     # ── channel ─────────────────────────────────────────────────────────
+    # rxChannelEn: scalar (broadcast to all 4 devices) OR length-4 list
+    # [Dev1, Dev2, Dev3, Dev4]. 0x00 is allowed (RX off on that device) -
+    # mmWave Studio requires >=1 RX per device, but mmWaveLink/TDA does not.
     channel = _require_section(mimo, "channel")
-    config.channelCfg.rxChannelEn = <uint16_t>(_require(channel, "rxChannelEn", "mimo.channel"))
+    rx_raw = _require(channel, "rxChannelEn", "mimo.channel")
+    if isinstance(rx_raw, (list, tuple)):
+        if len(rx_raw) != 4:
+            raise ValueError(
+                f"mimo.channel.rxChannelEn list must have 4 entries "
+                f"(one per device), got {len(rx_raw)}"
+            )
+        _rx_channel_en_table = [int(x) for x in rx_raw]
+    else:
+        _rx_v = int(rx_raw)
+        _rx_channel_en_table = [_rx_v, _rx_v, _rx_v, _rx_v]
+    config.channelCfg.rxChannelEn = <uint16_t>_rx_channel_en_table[0]
     config.channelCfg.txChannelEn = <uint16_t>(_require(channel, "txChannelEn", "mimo.channel"))
 
     # ── chirp / antenna geometry ────────────────────────────────────────
@@ -781,7 +799,10 @@ cpdef mmw_set_config(dict configdict):
     # in TOML; written to .mmwave.json for documentation only when present.
 
     config.frameCfg.numAdcSamples = 2 * config.profileCfg[0].numAdcSamples
-    config.dataFmtCfg.rxChannelEn = config.channelCfg.rxChannelEn
+    # dataFmtCfg.rxChannelEn is applied per-device in configure(); seed with
+    # master mask here so the struct is never left at zero if something
+    # reads it before the per-device loop.
+    config.dataFmtCfg.rxChannelEn = <uint16_t>_rx_channel_en_table[0]
     config.dataFmtCfg.adcBits = config.adcOutCfg.fmt.b2AdcBits
     config.dataFmtCfg.adcFmt = config.adcOutCfg.fmt.b2AdcOutFmt
 
@@ -842,29 +863,19 @@ cpdef int mmw_reconfigure_frame_count(int num_frames):
         )
     config.frameCfg.numFrames = <uint16_t>num_frames
 
-    status += MMWL_frameConfig(
-        config.masterMap,
-        config.frameCfg,
-        config.channelCfg,
-        config.adcOutCfg,
-        config.datapathCfg,
-        config.profileCfg[0]
-    )
-    check(status,
-        b"[MASTER] Frame count reconfigured!",
-        b"[MASTER] Frame count reconfiguration failed!", config.masterMap, TRUE)
-
-    status += MMWL_frameConfig(
-        config.slavesMap,
-        config.frameCfg,
-        config.channelCfg,
-        config.adcOutCfg,
-        config.datapathCfg,
-        config.profileCfg[0]
-    )
-    check(status,
-        b"[SLAVE] Frame count reconfigured!",
-        b"[SLAVE] Frame count reconfiguration failed!", config.slavesMap, TRUE)
+    for devId in range(4):
+        config.channelCfg.rxChannelEn = <uint16_t>int(_rx_channel_en_table[devId])
+        status += MMWL_frameConfig(
+            1 << devId,
+            config.frameCfg,
+            config.channelCfg,
+            config.adcOutCfg,
+            config.datapathCfg,
+            config.profileCfg[0]
+        )
+        check(status,
+            b"[DEV] Frame count reconfigured!",
+            b"[DEV] Frame count reconfiguration failed!", 1 << devId, TRUE)
 
     return status
 

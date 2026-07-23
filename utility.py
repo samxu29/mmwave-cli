@@ -190,6 +190,14 @@ def _as_hex(value):
     return f"0x{int(value):X}"
 
 
+def _rx_channel_en_for_device(channel, dev_id):
+    """Resolve mimo.channel.rxChannelEn for one device (scalar or length-4 list)."""
+    rx = channel["rxChannelEn"]
+    if isinstance(rx, (list, tuple)):
+        return rx[dev_id]
+    return rx
+
+
 def export_config_to_json(config_dict, filename, num_devices=4):
     """
     Create mmwave.json from config_dict (Studio-compatible structure).
@@ -290,7 +298,7 @@ def export_config_to_json(config_dict, filename, num_devices=4):
                 "MIMOScheme": "TDM",
                 "rlCalibrationDataFile": "",
                 "rlChanCfg_t": {
-                    "rxChannelEn": _as_hex(channel["rxChannelEn"]),
+                    "rxChannelEn": _as_hex(_rx_channel_en_for_device(channel, devId)),
                     "txChannelEn": _as_hex(channel["txChannelEn"]),
                     "cascading": 1 if devId == 0 else 2,
                     "cascadingPinoutCfg": "0x0"

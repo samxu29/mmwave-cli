@@ -24,13 +24,14 @@ Adding a new preset:
        (e.g. radar_configs/wide_idle.toml -> preset name "wide_idle").
     2. Edit only the fields that differ.
     3. Select it:  python3 mimo.py --radar-config <name>
+
+mimo.channel.rxChannelEn may be a scalar (broadcast to all 4 devices) or a
+length-4 list [Dev1, Dev2, Dev3, Dev4] for per-device RX enable
+(see cascade_tx3_rx8.toml).
 """
 import os
 
-try:
-    import tomllib  # stdlib on Python 3.11+
-except ModuleNotFoundError:
-    import tomli as tomllib  # pip install tomli, for Python < 3.11
+import tomli as tomllib
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
