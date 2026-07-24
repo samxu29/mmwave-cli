@@ -60,8 +60,20 @@ def _frame_period_s(cfg):
 
 
 def _wait_s_for_frames(num_frames, period_s):
-    """Host wait after start_frame: N periods + one period margin for TDA flush."""
-    return num_frames * period_s + period_s
+    """Host wait after start_frame before de-arming the TDA.
+
+    = N periods (the actual framing time) + a startup/flush margin.
+
+    The margin must cover the latency between start_frame() returning and the
+    master ACTUALLY emitting its first frame (slave-arm sleep, RPC round-trips,
+    first-frame calibration, PLL settle) PLUS TDA flush at the end. With only
+    one period (~0.1 s) of margin this latency (seconds, and variable run to
+    run) truncated the capture window, so de-arm cut the TDA off before the
+    radar finished all N frames - showing up as erratic "dropped frames" that
+    were really window truncation, not RF/SSD loss. A generous fixed margin
+    removes that artifact; the radar auto-stops at numFrames so waiting extra
+    is harmless (stop_frame() then just reports frame-already-ended)."""
+    return num_frames * period_s + period_s + 5.0
 
 
 def _rx_popcount_per_device(cfg):
