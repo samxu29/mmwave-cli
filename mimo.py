@@ -127,15 +127,26 @@ def _rx_popcount_per_device(cfg):
     return [n, n, n, n]
 
 
+def _data_packing(cfg):
+    """TDA dataPacking mode for this capture: 0 = 16-bit, 1 = packed 12-bit.
+    Read from mimo.datapath.dataPacking, which mimo.py sets from
+    --data-packing; absent means 16-bit."""
+    try:
+        return 1 if int(cfg["mimo"]["datapath"].get("dataPacking", 0)) == 1 else 0
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return 0
+
+
 def _expected_bytes_per_frame_for_device(cfg, dev_id):
     """
-    On-disk bytes for ONE frame in a single device's <dev>_0000_data.bin, for
-    16-bit complex ADC (the only layout this tool writes - TDA dataPacking is
-    hard-coded 0 = 16-bit in mmw_arming_tda()).
+    On-disk bytes for ONE frame in a single device's <dev>_0000_data.bin.
 
-        bytes/frame/device =
-            numAdcSamples × chirpsPerLoop × numLoops × numRxOnThisDevice
-            × 2 (I+Q) × 2 (bytes per 16-bit sample)
+        real samples/frame/device =
+            numAdcSamples × chirpsPerLoop × numLoops × numRxOnThisDevice × 2 (I+Q)
+
+    times bytes per sample, which depends on the TDA packing mode: 2 bytes at
+    16-bit (dataPacking 0), or 1.5 bytes at packed 12-bit (dataPacking 1, four
+    samples per 6 bytes) - computed as samples*3//2 to stay exact.
 
     chirpsPerLoop = chirpEndIdx - chirpStartIdx + 1. numRxOnThisDevice is the
     popcount of that device's rxChannelEn (supports per-device lists). Returns
@@ -153,7 +164,10 @@ def _expected_bytes_per_frame_for_device(cfg, dev_id):
             return None
         if num_rx <= 0:
             return 0
-        return num_adc * chirps_per_loop * num_loops * num_rx * 2 * 2
+        samples = num_adc * chirps_per_loop * num_loops * num_rx * 2
+        if _data_packing(cfg) == 1:
+            return samples * 3 // 2
+        return samples * 2
     except (KeyError, TypeError, ValueError, IndexError):
         return None
 
@@ -270,8 +284,9 @@ def _report_write_budget(cfg):
     if req is None:
         return None
     pct = req / TDA_SSD_WRITE_MBPS * 100.0
+    packing = "12-bit packed" if _data_packing(cfg) == 1 else "16-bit"
     print(f"TDA write budget : {req:.1f} MB/s needed, "
-          f"{TDA_SSD_WRITE_MBPS:.0f} MB/s measured ({pct:.0f}%)")
+          f"{TDA_SSD_WRITE_MBPS:.0f} MB/s measured ({pct:.0f}%)  [{packing}]")
     if req > TDA_SSD_WRITE_MBPS:
         print(f"  ** OVER BUDGET: the SSD cannot keep up. Expect heavy frame "
               f"loss on longer captures")
@@ -626,7 +641,8 @@ def run_one_capture(exp_label, num_frames, tda_ip, prealloc_files=None,
     # radar won't start for ~2.1 s (see TDA_ARM_FRAME_HEADROOM).
     status = mmwcas.mmw_arming_tda(capture_dir,
                                    num_frames + TDA_ARM_FRAME_HEADROOM,
-                                   prealloc_files)
+                                   prealloc_files,
+                                   _data_packing(config_dict))
     if status != 0:
         print(f"mmw_arming_tda failed (status: {status})")
         return status, capture_dir
@@ -736,6 +752,16 @@ def main():
                              'reserves a fixed 2047 MB. Without pre-allocation the '
                              'TDA grows the file while frames stream in and drops '
                              'random frames; use 0 only to A/B test that.')
+    parser.add_argument('--data-packing',
+                        type=int,
+                        default=0,
+                        choices=(0, 1),
+                        help='TDA ADC data packing: 0 = 16-bit as-is (default), '
+                             '1 = drop the 4 LSBs and pack 12-bit, which cuts the '
+                             'write rate to 75%% and buys SSD headroom. 12-bit '
+                             'costs 4 bits of amplitude resolution and REQUIRES '
+                             'downstream unpacking - validate phase/displacement '
+                             'precision before using it for real captures.')
     parser.add_argument('--no-reclaim-padding',
                         action='store_true',
                         help='Leave pre-allocated capture files at their full '
@@ -768,6 +794,10 @@ def main():
     period_ms = float(config_dict["mimo"]["frame"]["framePeriodicity"])
     period_s = period_ms / 1000.0
     config_dict["mimo"]["frame"]["numFrames"] = args.frames
+    # Packing is a capture-time choice, but every byte-size calculation and the
+    # .mmwave.json sidecar has to agree with it, so keep it in the config dict
+    # rather than threading it through separately.
+    config_dict["mimo"].setdefault("datapath", {})["dataPacking"] = args.data_packing
     approx_s = args.frames * period_s
 
     print(f"Capture frames   : {args.frames}  (~{approx_s:.1f}s @ {period_ms:.0f} ms/frame)")

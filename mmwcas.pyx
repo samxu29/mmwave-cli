@@ -940,7 +940,8 @@ cpdef int mmw_reconfigure_frame_count(int num_frames):
 
     return status
 
-cpdef int mmw_arming_tda(str capture_path, int num_frames=-1, int num_files=0):
+cpdef int mmw_arming_tda(str capture_path, int num_frames=-1, int num_files=0,
+                         int data_packing=0):
     """@brief Prepare the TDA board and notify TDA about the start of recording
     * @capture_path capture path setup to arm the TDA for recording
     * @num_frames frames for TDA to record (-1 = use config.frameCfg.numFrames;
@@ -960,6 +961,16 @@ cpdef int mmw_arming_tda(str capture_path, int num_frames=-1, int num_files=0):
     *             _tda_prealloc_files there / --tda-prealloc-files).
     *             Kept at 0 by default so this signature stays backwards
     *             compatible with callers that don't pass it.
+    * @data_packing 0 = store ADC samples as-is at 16 bit; 1 = drop the 4 LSBs
+    *             and pack four 12-bit samples into 6 bytes, cutting the write
+    *             rate to 75%. TI's Cascade_Capture.lua: "select whether to use
+    *             16-bit ADC data as is, or drop 4 lsbits and save 4*12-bit
+    *             numbers in a packed form. This allows a higher frame rate to
+    *             be achieved, at the expense of some post-processing to unpack
+    *             the data later." The TDA does the packing - no RF/datapath
+    *             reconfiguration is involved. NOTE: downstream readers must
+    *             unpack ('*ubit12' rather than 'uint16'); mimo.py records the
+    *             mode in the .mmwave.json sidecar so they can tell.
     * @return int
     """
     cdef int status = 0
@@ -981,7 +992,7 @@ cpdef int mmw_arming_tda(str capture_path, int num_frames=-1, int num_files=0):
         tdaCfg.numberOfFramesToCapture = config.frameCfg.numFrames
     else:
         tdaCfg.numberOfFramesToCapture = <unsigned int>num_frames
-    tdaCfg.dataPacking = 0              # 0: 16-bit | 1: 12-bit
+    tdaCfg.dataPacking = <unsigned int>data_packing   # 0: 16-bit | 1: 12-bit
 
     status = MMWL_ArmingTDA(tdaCfg)
     check(status,

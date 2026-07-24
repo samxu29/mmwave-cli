@@ -442,6 +442,11 @@ def export_config_to_json(config_dict, filename, num_devices=4):
                 "rlDynPerChirpPhShftCfgs": []
             },
             "rawDataCaptureConfig": {
+                # How the TDA wrote the samples: 0 = 16-bit as-is, 1 = 4 LSBs
+                # dropped and packed as 12-bit (read with '*ubit12', not
+                # 'uint16'). Recorded per capture so downstream processing can
+                # tell without being told out of band.
+                "dataPacking": int(datapath.get("dataPacking", 0)),
                 "rlDevDataFmtCfg_t": {
                     "iqSwapSel": datapath["iqSwapSel"],
                     "chInterleave": datapath["chInterleave"]
