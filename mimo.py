@@ -7,23 +7,49 @@ frame timing) has moved OUT of this file and into radar_config.py
 idle-time scheme or antenna geometry preset without editing this file. Select
 a non-default preset with --radar-config <name>.
 
-FRAME DROPS / TDA FILE PRE-ALLOCATION (2026-07-24): the TDA must be armed with
-numberOfFilesToAllocate > 0. With 0 (the old hard-coded value) it grows the
-capture file while frames stream in, and that filesystem work on the write path
-silently loses whole frames - measured 8-20 missing out of 300, scattered
-mid-capture, identically on every device. Measured A/B on identical back-to-back
-300-frame captures: pre-allocation ON -> 299 frames, zero internal gaps, period
-99.88-100.13 ms; OFF -> 284 frames, 16 scattered gaps of exactly 2x the period.
-It is NOT an RF or bandwidth problem: a 35%-duty preset drops the same as a
-98%-duty one, 122 MB/s drops the same as 61 MB/s, and the SSD was 3% full
-throughout. mimo.py sizes the allocation automatically (_tda_prealloc_files);
---tda-prealloc-files 0 restores the broken behaviour for A/B testing only.
-Because TI fixes each pre-allocated file at 2047 MB no matter how many frames
-land in it, the padding is trimmed back to the real payload after each capture
-(--no-reclaim-padding to keep it). Frame counts therefore come from
+FRAME DROPS (investigated 2026-07-24, bug/capture-frame-drop - READ THIS BEFORE
+RE-INVESTIGATING). This rig loses roughly 3-5% of requested frames, and that is
+its measured baseline, not a misconfiguration. Across nine 300-frame
+cascade_tx3_rx8 captures the count ranged 280-299 with no trend. The losses are
+always: single frames absent from an otherwise perfect 100 ms grid (each gap
+exactly 2.00 periods, surviving frames at median 100.01 ms), mid-capture rather
+than at the tail, and at IDENTICAL frame indices on master and slave - so a
+shared cause upstream of the per-device links.
+
+RULED OUT BY EXPERIMENT - please don't re-litigate these without new evidence:
+  * RF frame overrun / duty cycle: cascade_mimo at 35% duty (65 ms idle/frame)
+    drops as much as cascade_tx3_rx8 at 98% (2.1 ms idle).
+  * Write bandwidth: LOWERING the rate made it worse - 12-bit packing cut
+    62.7 -> 47.0 MB/s and drops went from 1-7 up to 17.
+  * SSD capacity: drive was 3-5% used throughout (430 GB free).
+  * SSD throughput: 3 GB written in 500 MB chunks holds a flat 92-101 MB/s, no
+    SLC-cache or thermal collapse.
+  * Temperature: RF dies run 43->55 degC (rated ~125), and the TDA SoC does not
+    even warm during a capture (69.8->69.4, 70.2->69.8, 70.6->70.6) - it sits at
+    ~70 degC idle because capture is I/O-bound, not compute-bound.
+  * Host wait time: +5 s of extra margin recovered nothing.
+  * TDA arm window: worth only ~2 frames of the shortfall (the tail), see
+    TDA_ARM_FRAME_HEADROOM.
+
+WHAT HELPED, MODESTLY: arming with numberOfFilesToAllocate > 0 so the TDA is not
+extending the capture file while frames stream in. Pooled means over identical
+300-frame runs - OFF 286.5 (280/284/290/292), ON 291.8 (286/290/291/293/299): ~5
+frames better and a higher floor, but well inside run-to-run scatter, so treat it
+as an improvement rather than a fix. _tda_prealloc_files() sizes it;
+--tda-prealloc-files 0 restores the old behaviour for A/B testing. Because TI
+fixes each pre-allocated file at 2047 MB regardless of frames recorded, the
+padding is trimmed back to the real payload afterwards (--no-reclaim-padding to
+keep it).
+
+CONSEQUENCE FOR DOWNSTREAM - the important part. Frame counts come from
 <dev>_0000_idx.bin (24-byte header + 48 bytes/frame), never from the data file
-size, which pre-allocation inflates. Use parse_idx.py to inspect per-frame
-timestamps when a capture looks short.
+size, which pre-allocation inflates. That index also stores a TIMESTAMP per
+frame, and processing MUST place frames by those timestamps: treating N captured
+frames as N contiguous samples at dt scales every derived frequency by the drop
+fraction (at 283/300 that is a 5.5% bias, ~0.11 Hz on a 2 Hz mode - larger than
+the 0.067 Hz frequency resolution, and it varies per capture). Displacement is
+far less affected, since a 200 ms gap needs >lambda/4 ~ 0.97 mm of motion to
+break phase unwrapping. Use parse_idx.py to inspect any capture.
 
 Capture length is defined by FRAME COUNT (--frames), not wall-clock seconds.
 The radar + TDA are programmed with that numFrames so they stop after exactly
@@ -211,10 +237,11 @@ TDA_SSD_WRITE_MBPS = 92.0
 # little headroom to absorb a stall without losing frames.
 TDA_SSD_WRITE_WARN_FRACTION = 0.7
 
-# Shortfall (frames) treated as the known tail effect rather than the drop bug.
-# With file pre-allocation on, a 300-frame capture lands at 299-300; the old
-# no-prealloc path lost 8-20 scattered mid-capture. Anything above this is worth
-# the full diagnosis.
+# Shortfall (frames) reported as a one-line note rather than the full diagnosis.
+# Deliberately small: this rig's baseline loss is ~3-5% (see FRAME DROPS above),
+# so most captures DO print the long form. That is intended - the shortfall is
+# real, it is not yet fixed, and downstream has to know the frames are missing.
+# Raising this would only hide it.
 FRAME_SHORTFALL_NOISE_FLOOR = 2
 
 # Bytes of the TDA's <dev>_0000_idx.bin: a 24-byte file header followed by one
@@ -276,10 +303,14 @@ def _required_write_rate_mbps(cfg):
 def _report_write_budget(cfg):
     """Print the capture's write rate against what the TDA SSD can sustain.
 
-    Worth checking before every capture: at ~92 MB/s measured, a 4-device
-    16-bit preset at 10 fps needs ~126 MB/s and simply cannot be sustained -
-    it only appears to work for short captures because the TDA's DDR absorbs
-    the deficit until it runs out. Returns the required rate (or None).
+    Worth checking before every capture: at ~92 MB/s measured, a 4-device 16-bit
+    preset at 10 fps needs ~126 MB/s, which is arithmetically impossible to
+    sustain (short captures survive only while TDA DDR absorbs the deficit).
+
+    Staying under budget is necessary but NOT sufficient - cascade_tx3_rx8 sits
+    at 68% and still drops ~3-5%, and cutting it to 47 MB/s with 12-bit packing
+    made the loss worse. So read a green figure here as "bandwidth is not your
+    problem", never as "this capture will be complete". Returns the rate or None.
     """
     req = _required_write_rate_mbps(cfg)
     if req is None:
@@ -520,60 +551,43 @@ def _warn_on_frame_drops(files, num_frames, cfg):
     elif max_dropped > 0:
         print(f"\n  ** WARNING: {max_dropped} frame(s) short of the requested "
               f"{num_frames}. **")
-        # What the measurements actually show (parse_idx.py on the TDA's own
-        # per-frame index, 300-frame captures):
-        #   * The 100 ms frame grid is never disturbed - captured frames sit at
-        #     median 100.01 ms (min 99.97). Missing frames are simply ABSENT
-        #     from a perfect grid, each gap exactly 2.00 periods.
-        #   * Master and slaves lose the SAME frame indices => shared cause.
-        #   * Ruled out - RF frame overrun: cascade_mimo at 35% duty (65 ms
-        #     idle/frame) drops just as much as cascade_tx3_rx8 at 98%.
-        #   * Ruled out - raw bandwidth: 122 MB/s (4 dev) and 61 MB/s (2 dev)
-        #     both dropped 8; and the same preset varies 8/10/20 run to run.
-        # A perfect grid with random single frames vanishing, uncorrelated with
-        # data rate, is a LATENCY stall in the shared capture/write path, not a
-        # throughput ceiling and not RF scheduling. Prime suspect is the TDA
-        # SSD stalling (GC / journal flush) - note mimo.py never cleans
-        # /mnt/ssd, and drops got worse as the disk filled.
-        print(f"     Frames are missing from an otherwise perfect frame grid "
-              f"(shared across devices),")
-        print(f"     i.e. a stall in the TDA capture/write path - not RF "
-              f"scheduling (a 35%-duty")
-        print(f"     preset drops like a 98% one) and not SSD fill (drive was "
-              f"3% used).")
-        req = _required_write_rate_mbps(cfg)
-        if req is not None:
-            print(f"     This capture needs {req:.1f} MB/s of the "
-                  f"~{TDA_SSD_WRITE_MBPS:.0f} MB/s the SSD sustains "
-                  f"({req / TDA_SSD_WRITE_MBPS * 100:.0f}%) -")
-            print(f"     the less headroom, the less able it is to ride out a "
-                  f"stall. Lower the rate")
-            print(f"     (numLoops / RX / numAdcSamples) or raise "
-                  f"framePeriodicity to buy margin.")
-        print(f"     Localise the losses with:  python3 parse_idx.py --fetch "
-              f"<capture_dir>")
-        print(f"     - internal gaps of k x period  = frames lost mid-capture "
-              f"(the main bug);")
-        print(f"     - shortfall only at the TAIL   = window truncation "
-              f"(TDA_ARM_FRAME_HEADROOM,")
-        print(f"                                      currently "
-              f"{TDA_ARM_FRAME_HEADROOM} frames).")
+        # A ~3-5% loss is the measured baseline of this rig, not a misconfigured
+        # capture, so do not send the reader off tuning parameters. Every
+        # plausible knob has been tested and ruled out - see the FRAME DROPS
+        # section of this module's docstring for the evidence. Say what is
+        # known, and point at the one thing that actually helps: using the
+        # per-frame timestamps instead of assuming uniform sampling.
+        pct = max_dropped / num_frames * 100.0
+        print(f"     Frames are missing from an otherwise perfect frame grid, "
+              f"the same indices on")
+        print(f"     every device. ~3-5% is this rig's measured baseline "
+              f"(observed 280-299 of 300).")
+        print(f"     Ruled out by experiment: RF duty cycle, write bandwidth, "
+              f"SSD fill, SSD")
+        print(f"     throughput, RF die and TDA SoC temperature, host wait "
+              f"time. Do not retune")
+        print(f"     for it - see the FRAME DROPS notes in this file's "
+              f"docstring before retrying.")
+        if pct > 8.0:
+            print(f"     {pct:.1f}% is well above that baseline though, so "
+                  f"something IS different here.")
+        print(f"     Inspect with:  python3 parse_idx.py --fetch <capture_dir>")
+        print(f"     IMPORTANT: _idx.bin carries a timestamp per frame. "
+              f"Downstream must place")
+        print(f"     frames by those timestamps - assuming N contiguous frames "
+              f"at dt biases every")
+        print(f"     frequency by the drop fraction (~{pct:.0f}% here).")
         active_us = _frame_active_time_us(cfg)
         try:
             period_ms = float(cfg["mimo"]["frame"]["framePeriodicity"])
         except (KeyError, TypeError, ValueError):
             period_ms = None
-        if active_us is not None and period_ms:
-            active_ms = active_us / 1000.0
-            duty = active_ms / period_ms * 100.0
-            print(f"     Context - chirp schedule: {active_ms:.1f} ms active per "
-                  f"{period_ms:.0f} ms frame "
-                  f"({duty:.0f}% duty, {period_ms - active_ms:.1f} ms idle).")
-            if active_ms > period_ms:
-                print(f"     NOTE: schedule EXCEEDS framePeriodicity - that "
-                      f"genuinely cannot be honoured;")
-                print(f"     shorten idleTimes / rampEndTime / numLoops or raise "
-                      f"framePeriodicity.")
+        if active_us is not None and period_ms and active_us / 1000.0 > period_ms:
+            print(f"     NOTE: chirp schedule ({active_us / 1000.0:.1f} ms) "
+                  f"EXCEEDS framePeriodicity")
+            print(f"     ({period_ms:.0f} ms) - that genuinely cannot be "
+                  f"honoured; shorten idleTimes /")
+            print(f"     rampEndTime / numLoops or raise framePeriodicity.")
     elif any_sized:
         print(f"\n  OK: all RX-enabled device files contain the full "
               f"{num_frames} frame(s).")
