@@ -123,6 +123,7 @@ from utility import signal_handler
 from utility import upload_files_to_tda
 from utility import truncate_capture_padding
 from utility import read_tda_thermal
+from utility import TeeLogger
 from radar_config import RADAR_CONFIGS, DEFAULT_RADAR_CONFIG, get_radar_config
 import os
 
@@ -837,6 +838,27 @@ def run_one_capture(exp_label, num_frames, tda_ip, prealloc_files=None,
     return status, capture_dir
 
 
+def _finish_log(tee, capture_dir, capture_ok, tda_ip):
+    """Name the log after the capture, close it, and ship it to the TDA.
+
+    Ordering matters: the log is CLOSED before it is uploaded, so the copy on
+    the TDA is complete rather than cut off mid-write. The only lines that end
+    up in the terminal but not in the file are this function's own, which is the
+    right trade - the uploaded log is the artefact that has to be trustworthy.
+
+    Only uploads on a successful capture, since a run that died before the TDA
+    directory existed has nowhere to put it; that log stays local under logs/.
+    """
+    if tee is None:
+        return
+    if capture_dir:
+        tee.rename(os.path.join("logs", f"{capture_dir}.log"))
+    path = tee.stop()
+    print(f"\n Terminal log saved: {path}")
+    if capture_ok and capture_dir:
+        upload_files_to_tda([path], capture_dir, tda_ip)
+
+
 def main():
     # Parse command line arguments
     parser = argparse.ArgumentParser(description='TIDEP-01012 MIMO Cascade Radar Control IMRSL')
@@ -899,6 +921,15 @@ def main():
                         help='Named RF/geometry preset from radar_configs/*.toml '
                              f"(default: '{DEFAULT_RADAR_CONFIG}'). "
                              'Add new presets as .toml files there, not here.')
+    parser.add_argument('--no-log',
+                        action='store_true',
+                        help='Do not record this run\'s terminal output. By '
+                             'default everything printed (including the C-level '
+                             'STATUS lines from mmwcas) is written to '
+                             'logs/<capture_dir>.log and uploaded into the TDA '
+                             'capture directory alongside the .bin data, so the '
+                             'frame-drop report and temperatures stay attached '
+                             'to the capture they describe.')
     parser.add_argument('--frame-period-ms',
                         type=float,
                         default=None,
@@ -924,6 +955,21 @@ def main():
     if args.frame_period_ms is not None and args.frame_period_ms <= 0:
         print("Error: --frame-period-ms must be > 0")
         sys.exit(1)
+
+    # Start logging before ANY radar work, so a run that dies during configure
+    # still leaves a log explaining why. The capture directory name doesn't
+    # exist yet (its timestamp is minted in run_one_capture), hence the
+    # provisional filename and the rename once we know it.
+    tee = None
+    if not args.no_log:
+        provisional = os.path.join(
+            "logs", f"mimo_{datetime.now().strftime('%y%m%d_%H%M%S')}.log")
+        try:
+            tee = TeeLogger(provisional).start()
+        except (OSError, ImportError) as e:
+            print(f"[LOG] terminal logging unavailable ({e}); continuing "
+                  f"without it.")
+            tee = None
 
     # Select the RF/geometry preset (see radar_config.py) for this run.
     # deepcopy so CLI --frames can override TOML numFrames without mutating cache.
@@ -977,6 +1023,8 @@ def main():
     print(f"Recording frames: {args.frames}  (~{args.frames * period_s:.1f}s)")
     print("="*60)
 
+    capture_dir = None
+    capture_ok = False
     try:
         prealloc = (None if args.tda_prealloc_files < 0
                     else args.tda_prealloc_files)
@@ -989,6 +1037,7 @@ def main():
         print("\n" + "="*60)
         print(f"Data capture {capture_dir} completed successfully!")
         print("="*60)
+        capture_ok = True
 
     except KeyboardInterrupt:
         print("\n\nCapture interrupted by user")
@@ -1000,6 +1049,7 @@ def main():
         sys.exit(1)
     finally:
         teardown_ir_sensor()
+        _finish_log(tee, capture_dir, capture_ok, args.tda_ip)
 
 if __name__ == "__main__":
     main()

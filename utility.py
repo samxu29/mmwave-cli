@@ -1,5 +1,144 @@
+import os
+import select
 import subprocess
+import sys
+import threading
 import time
+
+
+class TeeLogger:
+    """Mirror everything the process prints into a log file, live.
+
+    Redirects at the FILE DESCRIPTOR level rather than by replacing sys.stdout,
+    because a large part of a capture's output - every "STATUS 0 | DEV MAP ..."
+    line, the chirp config dump, the TDA arm/framing messages - is printf() from
+    the compiled mmwcas extension and never passes through Python's stdout
+    object. Swapping sys.stdout would silently lose exactly the lines that say
+    whether the radar configured correctly.
+
+    The redirect target is a PTY, not a plain pipe. Behind a pipe the C library
+    switches from line buffering to 4 KB block buffering, so the terminal would
+    sit silent through most of a capture and then dump everything at exit; a pty
+    looks like a terminal to the C library, which keeps line buffering and the
+    live output unchanged. ONLCR is turned off on the slave so the log file gets
+    plain \\n rather than \\r\\n.
+
+    A reader thread pumps the pty back to the real stdout and into the file,
+    flushing every chunk, so a capture killed with Ctrl+C still leaves a
+    complete log up to the moment it died.
+    """
+
+    def __init__(self, path):
+        self.path = path
+        self._fh = None
+        self._master = None
+        self._saved_out = None
+        self._saved_err = None
+        self._thread = None
+
+    def start(self):
+        import pty
+        import termios
+
+        os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+        self._fh = open(self.path, "wb")
+        self._master, slave = pty.openpty()
+        try:
+            attrs = termios.tcgetattr(slave)
+            attrs[1] &= ~termios.ONLCR          # oflag: no \n -> \r\n
+            attrs[3] &= ~termios.ECHO           # lflag: nothing echoes back
+            termios.tcsetattr(slave, termios.TCSANOW, attrs)
+        except termios.error:
+            pass                                 # cosmetic only, keep going
+
+        sys.stdout.flush()
+        sys.stderr.flush()
+        self._saved_out = os.dup(1)
+        self._saved_err = os.dup(2)
+        os.dup2(slave, 1)
+        os.dup2(slave, 2)
+        os.close(slave)
+
+        # Python's own buffering mode was fixed at interpreter startup from the
+        # ORIGINAL stdout, so under `nohup`/`> file` it is block-buffered while
+        # the C side stays line-buffered through the pty. The two streams then
+        # interleave wrongly and the log reads out of order. Force line
+        # buffering so both sides land in the file in the order they happened.
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                stream.reconfigure(line_buffering=True)
+            except (AttributeError, ValueError, OSError):
+                pass
+
+        self._thread = threading.Thread(target=self._pump, daemon=True)
+        self._thread.start()
+        return self
+
+    def _pump(self):
+        while True:
+            try:
+                chunk = os.read(self._master, 4096)
+            except OSError:
+                break                            # EIO once the slave is gone
+            if not chunk:
+                break
+            try:
+                os.write(self._saved_out, chunk)
+                self._fh.write(chunk)
+                self._fh.flush()
+            except (OSError, ValueError):
+                break
+
+    def rename(self, new_path):
+        """Move the log to its final name mid-run.
+
+        The capture directory name (with its timestamp) only exists once the
+        capture starts, but logging has to be running before that to catch the
+        configuration output. So the log opens under a provisional name and is
+        renamed here; the write handle survives the rename, so nothing is lost.
+        """
+        if not self._fh:
+            return self.path
+        os.makedirs(os.path.dirname(new_path) or ".", exist_ok=True)
+        try:
+            os.replace(self.path, new_path)
+            self.path = new_path
+        except OSError:
+            pass
+        return self.path
+
+    def stop(self):
+        """Restore the real stdout/stderr and close the log."""
+        if self._saved_out is None:
+            return self.path
+        sys.stdout.flush()
+        sys.stderr.flush()
+
+        # Drain before tearing the pty down. Restoring fd 1/2 drops the last
+        # descriptors on the slave, and a master read() after that returns EIO
+        # and discards anything still sitting in the pty buffer - which cost the
+        # final lines of the log (the completion banner) until this loop
+        # existed. Wait for the reader thread to see a few consecutive quiet
+        # polls, with a hard deadline so stop() can never hang a capture.
+        deadline = time.time() + 1.0
+        quiet = 0
+        while quiet < 3 and time.time() < deadline:
+            readable, _, _ = select.select([self._master], [], [], 0.02)
+            quiet = 0 if readable else quiet + 1
+
+        os.dup2(self._saved_out, 1)
+        os.dup2(self._saved_err, 2)
+        os.close(self._saved_out)
+        os.close(self._saved_err)
+        self._saved_out = self._saved_err = None
+        if self._thread:
+            self._thread.join(timeout=2.0)
+        for closer in (lambda: os.close(self._master), self._fh.close):
+            try:
+                closer()
+            except (OSError, ValueError):
+                pass
+        return self.path
 
 
 def _ls_capture_dir(remote_path, tda_ip):
