@@ -185,6 +185,17 @@ def _frame_active_time_us(cfg):
 # Each file the TDA pre-allocates is a fixed 2047 MB (TI's Cascade_Capture.lua).
 TDA_PREALLOC_FILE_BYTES = 2047 * 1024 * 1024
 
+# Sustained sequential write the TDA's NVMe actually delivers, MB/s (10^6 B).
+# Measured 2026-07-24 by writing 3 GB in 500 MB chunks with a sync after each:
+# 92.1, 101.5, 93.2, 95.7, 91.7, 91.6 MB/s - flat, so no SLC-cache exhaustion or
+# thermal throttling, just a modest ceiling. Far below what "NVMe" implies, and
+# low enough that a capture's aggregate write rate has to be checked against it.
+TDA_SSD_WRITE_MBPS = 92.0
+
+# Fraction of TDA_SSD_WRITE_MBPS above which a capture is considered to have too
+# little headroom to absorb a stall without losing frames.
+TDA_SSD_WRITE_WARN_FRACTION = 0.7
+
 # Shortfall (frames) treated as the known tail effect rather than the drop bug.
 # With file pre-allocation on, a 300-frame capture lands at 299-300; the old
 # no-prealloc path lost 8-20 scattered mid-capture. Anything above this is worth
@@ -222,6 +233,56 @@ def _tda_prealloc_files(cfg, num_frames):
         return 1
     total = bpf * max(int(num_frames), 1)
     return max(1, -(-total // TDA_PREALLOC_FILE_BYTES))   # ceil division
+
+
+def _required_write_rate_mbps(cfg):
+    """Aggregate MB/s (10^6 B) the TDA must write to keep up with this preset.
+
+    Summed across all RX-enabled devices, since they all land on the same SSD:
+        sum(bytes/frame/device) / framePeriodicity
+    Returns None if the per-frame size or frame period can't be derived.
+    """
+    try:
+        period_s = float(cfg["mimo"]["frame"]["framePeriodicity"]) / 1000.0
+    except (KeyError, TypeError, ValueError):
+        return None
+    if period_s <= 0:
+        return None
+    total = 0
+    for dev in range(4):
+        bpf = _expected_bytes_per_frame_for_device(cfg, dev)
+        if bpf:
+            total += bpf
+    if not total:
+        return None
+    return total / period_s / 1e6
+
+
+def _report_write_budget(cfg):
+    """Print the capture's write rate against what the TDA SSD can sustain.
+
+    Worth checking before every capture: at ~92 MB/s measured, a 4-device
+    16-bit preset at 10 fps needs ~126 MB/s and simply cannot be sustained -
+    it only appears to work for short captures because the TDA's DDR absorbs
+    the deficit until it runs out. Returns the required rate (or None).
+    """
+    req = _required_write_rate_mbps(cfg)
+    if req is None:
+        return None
+    pct = req / TDA_SSD_WRITE_MBPS * 100.0
+    print(f"TDA write budget : {req:.1f} MB/s needed, "
+          f"{TDA_SSD_WRITE_MBPS:.0f} MB/s measured ({pct:.0f}%)")
+    if req > TDA_SSD_WRITE_MBPS:
+        print(f"  ** OVER BUDGET: the SSD cannot keep up. Expect heavy frame "
+              f"loss on longer captures")
+        print(f"     (short ones survive only while TDA DDR absorbs the "
+              f"deficit). Reduce numLoops /")
+        print(f"     RX count / numAdcSamples, or raise framePeriodicity.")
+    elif req > TDA_SSD_WRITE_MBPS * TDA_SSD_WRITE_WARN_FRACTION:
+        print(f"  NOTE: little headroom - a brief SSD stall can't be absorbed, "
+              f"so occasional")
+        print(f"  single-frame losses are likely. Check with parse_idx.py.")
+    return req
 
 
 def _frames_from_idx_size(size):
@@ -394,14 +455,20 @@ def _warn_on_frame_drops(files, num_frames, cfg):
         # SSD stalling (GC / journal flush) - note mimo.py never cleans
         # /mnt/ssd, and drops got worse as the disk filled.
         print(f"     Frames are missing from an otherwise perfect frame grid "
-              f"(shared across devices).")
-        print(f"     Ruled out by experiment: RF frame overrun (35% duty drops "
-              f"the same as 98%),")
-        print(f"     and raw bandwidth (122 vs 61 MB/s drop alike). Suspect a "
-              f"stall in the TDA")
-        print(f"     capture/write path - check free space + old captures on "
-              f"the TDA SSD:")
-        print(f"         ssh root@<tda> 'df -h /mnt/ssd; ls /mnt/ssd | wc -l'")
+              f"(shared across devices),")
+        print(f"     i.e. a stall in the TDA capture/write path - not RF "
+              f"scheduling (a 35%-duty")
+        print(f"     preset drops like a 98% one) and not SSD fill (drive was "
+              f"3% used).")
+        req = _required_write_rate_mbps(cfg)
+        if req is not None:
+            print(f"     This capture needs {req:.1f} MB/s of the "
+                  f"~{TDA_SSD_WRITE_MBPS:.0f} MB/s the SSD sustains "
+                  f"({req / TDA_SSD_WRITE_MBPS * 100:.0f}%) -")
+            print(f"     the less headroom, the less able it is to ride out a "
+                  f"stall. Lower the rate")
+            print(f"     (numLoops / RX / numAdcSamples) or raise "
+                  f"framePeriodicity to buy margin.")
         print(f"     Localise the losses with:  python3 parse_idx.py --fetch "
               f"<capture_dir>")
         print(f"     - internal gaps of k x period  = frames lost mid-capture "
@@ -705,6 +772,7 @@ def main():
 
     print(f"Capture frames   : {args.frames}  (~{approx_s:.1f}s @ {period_ms:.0f} ms/frame)")
     print(f"Radar config     : {args.radar_config}")
+    _report_write_budget(config_dict)
 
     # Configure radar
     status = mmwcas.mmw_set_config(config_dict)
