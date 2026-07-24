@@ -179,6 +179,13 @@ _profile_id_per_chirp = []
 # list. Used by channelConfig / dataFmtConfig / frameConfig so devices can have
 # different RX counts (e.g. Dev2/Dev3 off -> 8 virtual RX from Dev1+Dev4).
 _rx_channel_en_table = [0x0F, 0x0F, 0x0F, 0x0F]
+# Which physical devices are active (bit0=Dev1/master .. bit3=Dev4/slave3).
+# Derived by mmw_set_config() from _rx_channel_en_table: a device whose RX
+# mask is 0 is DROPPED entirely - not powered, configured, or captured, so no
+# .bin file is written for it (e.g. rxChannelEn=[0x0F,0,0,0x0F] -> deviceMap=9
+# = master+slave3 only, an 8-RX virtual array from Dev1+Dev4). Master is
+# always kept. Defaults to all 4 for scalar/broadcast rxChannelEn.
+_device_map = 0x0F
 _config_applied = False   # True after a successful mmw_set_config() call
 
 # Mbps -> rlDevDataPathClkCfg_t.dataRate field code (rl_device.h). DDR-only
@@ -443,13 +450,21 @@ cdef int32_t initMaster(rlChanCfg_t channelCfg,rlAdcOutCfg_t adcOutCfg):
 
 cdef int32_t initSlaves(rlChanCfg_t channelCfg, rlAdcOutCfg_t adcOutCfg):
     cdef int status = 0
-    cdef uint8_t slavesMap = (1 << 1) | (1 << 2) | (1 << 3)
+    # Only slaves present in the active device map (Dev2/3/4 whose rxChannelEn
+    # != 0). Devices dropped via rxChannelEn=0 are skipped completely here.
+    cdef uint8_t slavesMap = <uint8_t>(_device_map & ((1 << 1) | (1 << 2) | (1 << 3)))
     cdef unsigned int slaveMap
+
+    # No active slaves (e.g. master-only map) -> nothing to init.
+    if slavesMap == 0:
+        return 0
 
     # slave chip
     channelCfg.cascading = 2
 
     for slaveId in range(1,4):
+        if not (_device_map & (1 << slaveId)):
+            continue
         slaveMap = 1 << slaveId
 
         status += MMWL_DevicePowerUp(slaveMap, 1000, 1000)
@@ -473,8 +488,10 @@ cdef int32_t initSlaves(rlChanCfg_t channelCfg, rlAdcOutCfg_t adcOutCfg):
         b"[SLAVE] RF successfully enabled!",
         b"[SLAVE] Error: Failed to enable master RF", slavesMap, TRUE)
 
-    # Per-device RX mask (slaves may differ, e.g. Dev2/Dev3 RX off).
+    # Per-device RX mask (active slaves only; dropped devices skipped).
     for slaveId in range(1, 4):
+        if not (_device_map & (1 << slaveId)):
+            continue
         slaveMap = 1 << slaveId
         channelCfg.rxChannelEn = <uint16_t>int(_rx_channel_en_table[slaveId])
         status += MMWL_channelConfig(slaveMap, channelCfg.cascading, channelCfg)
@@ -510,6 +527,8 @@ cdef uint32_t configure (devConfig_t config):
 
     # Per-device dataFmt.rxChannelEn (must match channelCfg for TDA width calc).
     for devId in range(4):
+        if not (_device_map & (1 << devId)):
+            continue
         config.dataFmtCfg.rxChannelEn = <uint16_t>int(_rx_channel_en_table[devId])
         status += MMWL_dataFmtConfig(1 << devId, config.dataFmtCfg)
     check(status,
@@ -546,6 +565,8 @@ cdef uint32_t configure (devConfig_t config):
 
     # MIMO Chirp configuration
     for devId in range(4):
+        if not (_device_map & (1 << devId)):
+            continue
         status += configureMimoChirp(devId, config.chirpCfg)
 
     check(status,
@@ -555,6 +576,8 @@ cdef uint32_t configure (devConfig_t config):
     # Per-device frame config so TDA width uses each device's RX popcount
     # (MMWL_frameConfig also sets software vs hardware trigger from deviceMap).
     for devId in range(4):
+        if not (_device_map & (1 << devId)):
+            continue
         config.channelCfg.rxChannelEn = <uint16_t>int(_rx_channel_en_table[devId])
         status += MMWL_frameConfig(
             1 << devId,
@@ -602,7 +625,7 @@ cpdef mmw_set_config(dict configdict):
     mmw_init().
     """
     global config, NUM_CHIRPS, _tx_antenna_table, _profile_id_per_chirp
-    global _rx_channel_en_table, _config_applied
+    global _rx_channel_en_table, _config_applied, _device_map
     cdef int pIdx
     cdef dict mimo, profile, frame, channel, chirp, adc_out, low_power, misc, ldo, datapath
 
@@ -613,9 +636,9 @@ cpdef mmw_set_config(dict configdict):
         )
     mimo = configdict["mimo"]
 
-    # Start from zeroed module-level structs (not RF defaults).
-    config.deviceMap = 1|(1<<1)|(1<<2)|(1<<3)
-    MMWL_AssignDeviceMap(config.deviceMap, &config.masterMap, &config.slavesMap)
+    # Start from zeroed module-level structs (not RF defaults). config.deviceMap
+    # is finalised AFTER the RX/TX tables are parsed (see the device-map
+    # derivation below) so devices with rxChannelEn=0 are dropped entirely.
     config.frameCfg = frameCfgArgs
     config.profileCfg[0] = profileCfgArgs0
     config.profileCfg[1] = profileCfgArgs1
@@ -690,9 +713,14 @@ cpdef mmw_set_config(dict configdict):
 
     # ── channel ─────────────────────────────────────────────────────────
     # rxChannelEn: scalar (broadcast to all 4 devices) OR length-4 list
-    # [Dev1, Dev2, Dev3, Dev4]. Each entry must be non-zero: stock TDA
-    # capture computes width from RX popcount and CreateApp times out (-8)
-    # if any enabled device has width=0.
+    # [Dev1, Dev2, Dev3, Dev4]. A list entry of 0 DROPS that device from the
+    # cascade entirely (deviceMap derivation below) - it is not powered,
+    # configured, or captured, so no .bin is written for it. This is the
+    # supported way to build sub-arrays (e.g. [0x0F,0,0,0x0F] = Dev1+Dev4,
+    # 8-RX virtual array). NOTE: you must NOT keep a device ENABLED with 0 RX
+    # (that path still fails: stock TDA computes width from RX popcount and
+    # CreateApp times out at -8 on a width-0 VIP port). Dropping the whole
+    # device avoids that because the TDA never opens a port for it.
     channel = _require_section(mimo, "channel")
     rx_raw = _require(channel, "rxChannelEn", "mimo.channel")
     if isinstance(rx_raw, (list, tuple)):
@@ -705,14 +733,12 @@ cpdef mmw_set_config(dict configdict):
     else:
         _rx_v = int(rx_raw)
         _rx_channel_en_table = [_rx_v, _rx_v, _rx_v, _rx_v]
-    for _dev_i, _rx_mask in enumerate(_rx_channel_en_table):
-        if int(_rx_mask) == 0:
-            raise ValueError(
-                f"mimo.channel.rxChannelEn[{_dev_i}]=0x0: TDA capture requires "
-                f">=1 RX on every enabled device (width=0 -> CreateApp timeout "
-                f"status -8). Use e.g. 0x01 minimum, or drop that device from "
-                f"the TDA capture-card setup."
-            )
+    if int(_rx_channel_en_table[0]) == 0:
+        raise ValueError(
+            "mimo.channel.rxChannelEn[0] (Dev1/master) must be non-zero: the "
+            "master is always required as the cascade LO/timing source and "
+            "cannot be dropped."
+        )
     config.channelCfg.rxChannelEn = <uint16_t>_rx_channel_en_table[0]
     config.channelCfg.txChannelEn = <uint16_t>(_require(channel, "txChannelEn", "mimo.channel"))
 
@@ -739,6 +765,32 @@ cpdef mmw_set_config(dict configdict):
                 f"each mimo.chirp.txAntennaTable row must have numChirps "
                 f"({NUM_CHIRPS}) entries, got {len(row)}"
             )
+
+    # ── deviceMap ───────────────────────────────────────────────────────
+    # Active physical devices = those with a non-zero RX mask. A device with
+    # rxChannelEn=0 is dropped: not powered/configured/captured (no .bin).
+    # A device that must transmit (any txAntennaTable entry >= 0) has to stay
+    # enabled, else its chirps could never fire.
+    _device_map = 0
+    for _dev_i in range(4):
+        if int(_rx_channel_en_table[_dev_i]) != 0:
+            _device_map |= (1 << _dev_i)
+    for _dev_i in range(4):
+        _tx_on = False
+        for _t in _tx_antenna_table[_dev_i]:
+            if int(_t) >= 0:
+                _tx_on = True
+                break
+        if _tx_on and not (_device_map & (1 << _dev_i)):
+            raise ValueError(
+                f"Device {_dev_i} transmits (txAntennaTable) but "
+                f"rxChannelEn[{_dev_i}]=0 drops it from the cascade. A "
+                f"transmitting device must stay enabled: give it >=1 RX, or "
+                f"remove its TX entries."
+            )
+    config.deviceMap = <uint8_t>_device_map
+    MMWL_AssignDeviceMap(config.deviceMap, &config.masterMap, &config.slavesMap)
+
     # Fine-dither vars: only 0.0 is supported today (encoding for non-zero
     # is not wired). Keys are still required so a missing TOML field fails.
     for _var_key in ("startFreqVar_MHz", "freqSlopeVar_KHz_usec",
@@ -939,8 +991,11 @@ cpdef int mmw_start_frame():
     """
     cdef int status = 0
     cdef int i
-    # Slaves first (bits 8, 4, 2 = slave3, slave2, slave1): arm hw-sync wait state
+    # Slaves first (bits 8, 4, 2 = slave3, slave2, slave1): arm hw-sync wait
+    # state. Only slaves present in the active device map are armed.
     for i in range(3, 0, -1):
+        if not (_device_map & (1 << i)):
+            continue
         status += MMWL_StartFrame(1 << i)
 
     time.sleep(0.1)  # let slaves finish arming before master fires the sync pulse
@@ -975,6 +1030,8 @@ cpdef int mmw_stop_frame():
     cdef int i
     cdef int dev_status
     for i in range(3, -1, -1):
+        if not (_device_map & (1 << i)):
+            continue
         dev_status = MMWL_StopFrame(1 << i)
         if dev_status != RL_RET_CODE_FRAME_ALREADY_ENDED:
             status += dev_status

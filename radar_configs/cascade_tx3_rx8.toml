@@ -1,21 +1,30 @@
 # radar_configs/cascade_tx3_rx8.toml
-# Low-bandwidth variant of cascade_tx3_rx16 (--radar-config cascade_tx3_rx8).
+# Dev1+Dev4 sub-array variant of cascade_tx3_rx16 (--radar-config cascade_tx3_rx8).
 #
-# PURPOSE: cut TDA->SSD write rate ~2x while keeping numLoops=255 and 10 fps.
+# GEOMETRY: only Dev1 (master) and Dev4 (slave3) are active, each with all 4 RX
+# -> 8 physical RX, 3 TX (Dev4) -> 24-element virtual array. Dev2 (slave1) and
+# Dev3 (slave2) are DROPPED entirely: not powered, configured, or captured, so
+# NO slave1_0000_data.bin / slave2_0000_data.bin are written at all (only
+# master_* and slave3_* appear in the capture dir). This is a two-widely-spaced
+# 4-RX-block layout, distinct from cascade_tx3_rx16's contiguous 16-RX line.
 #
-#   Changes vs cascade_tx3_rx16:
-#     rxChannelEn : 0x0F -> 0x03 (4 -> 2 RX/device; virtual array 3x16 -> 3x8)
+# HOW IT WORKS: rxChannelEn is a per-device LIST. An entry of 0 drops that
+# device from the cascade deviceMap (mmwcas.pyx derives deviceMap from this
+# table). This is the SUPPORTED way to build sub-arrays - unlike keeping a
+# device ENABLED with 0 RX, which still fails (stock TDA computes width from RX
+# popcount and CreateApp times out at -8 on a width-0 VIP port). Dropping the
+# whole device avoids that because the TDA never opens a port for it. Dev1
+# (master) can never be dropped - it is the cascade LO/timing source.
 #
-#   rate ~= 256 x 3 x 255 x 2 x 4 bytes x 4 dev / 0.1 s  ~= 62 MB/s
-#   (comfortably under the ~105-110 MB/s TDA SSD ceiling)
+# NOTE (hardware): running the cascade with the middle slaves (Dev2/Dev3)
+# unpowered is non-standard; the 20 GHz LO is distributed across the RF board,
+# so verify Dev4 still locks/captures on real hardware.
 #
-# WHY NOT "Dev1+Dev4 only" (rxChannelEn=[0x0F,0x00,0x00,0x0F])?
-#   Stock TDA capture requires width>0 on EVERY enabled VIP port. RX mask 0
-#   -> TDA width 0 -> Create Application ACK timeout (status -8). TI's own
-#   guidance: at least one RX per device that is enabled on the capture card.
-#   Per-device RX lists are still supported in mmwcas for non-zero masks.
+# DATA RATE: 256 x 3 x 255 x 4 RX x 4 bytes x 2 dev / 0.1 s ~= 62 MB/s - same as
+# the old 2-RX x 4-dev layout, so this does NOT change bandwidth or frame drops
+# (those are a chirp-schedule duty-cycle problem); it only changes geometry.
 #
-# Downstream processing MUST match 8 virtual RX (2 per device x 4) before
+# Downstream processing MUST match 8 physical RX (Dev1 x4 + Dev4 x4) before
 # beamforming. Everything else matches cascade_tx3_rx16.
 
 [mimo.profile]
@@ -48,19 +57,23 @@ triggerSelectMaster = 1         # software trigger
 triggerSelectSlave = 2          # hardware sync from master
 
 [mimo.channel]
-rxChannelEn = 0x03              # 2 RX/device (RX0/1) -> 8 virtual RX; TDA-safe (>=1 RX/device)
+# Per-device RX mask [Dev1, Dev2, Dev3, Dev4]. 0 = drop that device entirely
+# (no .bin written). Dev1+Dev4 with all 4 RX -> 8 physical RX.
+rxChannelEn = [0x0F, 0x00, 0x00, 0x0F]
 txChannelEn = 0x07              # Enable all 3 TX channels
 
 # Chirp geometry: per-device local TX antenna index per chirp (-1 = TX off).
 # Matches mmwcas/mimo.c chripTxTable - only Dev4 (index 3) transmits.
+# Dev2/Dev3 rows are RX-only placeholders; those devices are dropped anyway
+# (rxChannelEn=0), so their rows must stay all -1 (no TX on a dropped device).
 [mimo.chirp]
 numChirps = 3
 profileIdPerChirp = [0, 1, 2]
 txAntennaTable = [
-    [-1, -1, -1],                # Dev1 master: RX only
-    [-1, -1, -1],                # Dev2 slave1: RX only
-    [-1, -1, -1],                # Dev3 slave2: RX only
-    [0, 1, 2],                   # Dev4 slave3: TX0/TX1/TX2 on chirp0/1/2
+    [-1, -1, -1],                # Dev1 master: RX only (4 RX active)
+    [-1, -1, -1],                # Dev2 slave1: DROPPED (rxChannelEn=0)
+    [-1, -1, -1],                # Dev3 slave2: DROPPED (rxChannelEn=0)
+    [0, 1, 2],                   # Dev4 slave3: TX0/TX1/TX2 on chirp0/1/2 (4 RX active)
 ]
 startFreqVar_MHz = 0.0
 freqSlopeVar_KHz_usec = 0.0
