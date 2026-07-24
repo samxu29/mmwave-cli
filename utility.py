@@ -133,6 +133,53 @@ def check_captured_files(capture_dir, tda_ip="192.168.33.180", retries=4, retry_
         return False, 0, []
 
 
+def read_tda_thermal(tda_ip="192.168.33.180", timeout=15):
+    """
+    Read the TDA2 SoC thermal zones over SSH. Returns {zone_type: degC} or {}.
+
+    Complements the RF chips' on-die sensors (mmwcas.mmw_get_temperature): those
+    only cover the AWR2243 dies, but captured frames go missing from the TDA's
+    own index while the RF frame grid stays perfect, so the TDA is at least as
+    likely a place for a thermal stall. Measured 70.2 degC on cpu_thermal with
+    the board IDLE, which is warm enough to be worth tracking across a capture.
+
+    Zones seen on this board: cpu_thermal, gpu_thermal, core_thermal,
+    dspeve_thermal, iva_thermal (sysfs reports millidegrees).
+
+    Never raises - thermal data is diagnostic, so a failed read just yields {}.
+    """
+    remote = ('for z in /sys/class/thermal/thermal_zone*; do '
+              'echo "$(cat $z/type 2>/dev/null) $(cat $z/temp 2>/dev/null)"; done')
+    ssh_cmd = [
+        "ssh",
+        "-oHostKeyAlgorithms=+ssh-rsa",
+        "-oPubkeyAcceptedAlgorithms=+ssh-rsa",
+        "-oStrictHostKeyChecking=no",
+        "-oConnectTimeout=10",
+        f"root@{tda_ip}",
+        remote,
+    ]
+    try:
+        res = subprocess.run(ssh_cmd, capture_output=True, text=True,
+                             timeout=timeout)
+        if res.returncode != 0:
+            return {}
+        zones = {}
+        for line in res.stdout.strip().splitlines():
+            parts = line.split()
+            if len(parts) != 2:
+                continue
+            name, raw = parts
+            try:
+                milli = int(raw)
+            except ValueError:
+                continue
+            zones[name.replace("_thermal", "")] = milli / 1000.0
+        return zones
+    except Exception:
+        return {}
+
+
 def truncate_capture_padding(targets, capture_dir, tda_ip="192.168.33.180"):
     """
     Shrink pre-allocated capture files on the TDA down to their real payload.

@@ -69,6 +69,7 @@ from utility import check_captured_files
 from utility import signal_handler
 from utility import upload_files_to_tda
 from utility import truncate_capture_padding
+from utility import read_tda_thermal
 from radar_config import RADAR_CONFIGS, DEFAULT_RADAR_CONFIG, get_radar_config
 import os
 
@@ -326,6 +327,19 @@ def _dev_id_from_data_bin(name):
     if head.isdigit():
         return int(head)
     return None
+
+
+def _read_tda_temps(label, tda_ip):
+    """Print the TDA2 SoC thermal zones, return them. Read OUTSIDE the armed
+    window (before arming / after de-arming) so the SSH login can't add load
+    while the TDA is capturing."""
+    zones = read_tda_thermal(tda_ip)
+    if not zones:
+        return None
+    hottest = max(zones.values())
+    detail = "  ".join(f"{k} {v:.1f}" for k, v in sorted(zones.items()))
+    print(f"    [TDA TEMP] {label:5s} max {hottest:.1f}C   ({detail})")
+    return zones
 
 
 def _read_temps(label):
@@ -680,6 +694,8 @@ def run_one_capture(exp_label, num_frames, tda_ip, prealloc_files=None,
     print(f"\n>>> Capturing '{capture_dir}' — {num_frames} frames "
           f"(~{approx_s:.1f}s @ {period_s*1000:.0f} ms/frame) ...")
 
+    tda_temps_before = _read_tda_temps("pre", tda_ip)
+
     if prealloc_files is None:
         prealloc_files = _tda_prealloc_files(config_dict, num_frames)
     if prealloc_files:
@@ -735,6 +751,13 @@ def run_one_capture(exp_label, num_frames, tda_ip, prealloc_files=None,
     if status != 0:
         print(f"mmw_dearming_tda failed (status: {status})")
         return status, capture_dir
+
+    tda_temps_after = _read_tda_temps("post", tda_ip)
+    if tda_temps_before and tda_temps_after:
+        hot_b = max(tda_temps_before.values())
+        hot_a = max(tda_temps_after.values())
+        print(f"    [TDA TEMP] SoC rose {hot_a - hot_b:+.1f}C over this capture "
+              f"({hot_b:.1f}C -> {hot_a:.1f}C)")
 
     # Check if files were actually captured
     print("\n" + "="*60)
