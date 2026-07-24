@@ -1124,9 +1124,13 @@ cpdef dict mmw_get_temperature():
             "dig0": data.tmpDig0Sens, "dig1": data.tmpDig1Sens,
         }
         sensors["time_ms"] = data.time
-        sensors["max"] = max(sensors[k] for k in
-                             ("rx0", "rx1", "rx2", "rx3", "tx0", "tx1", "tx2",
-                              "pm", "dig0"))
+        # Plain list, not a generator expression: Cython does not support
+        # closures inside cpdef functions, and a genexpr argument creates one.
+        # dig1 is excluded - it reads 0 on AWR2243 (xWR1642/6843/1843 only).
+        hot = [data.tmpRx0Sens, data.tmpRx1Sens, data.tmpRx2Sens,
+               data.tmpRx3Sens, data.tmpTx0Sens, data.tmpTx1Sens,
+               data.tmpTx2Sens, data.tmpPmSens, data.tmpDig0Sens]
+        sensors["max"] = max(hot)
         out[i] = sensors
     return out
 
