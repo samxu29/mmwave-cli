@@ -328,6 +328,31 @@ def _dev_id_from_data_bin(name):
     return None
 
 
+def _arm_tda(capture_dir, num_frames, prealloc_files, packing):
+    """Arm the TDA, tolerating an mmwcas built before data_packing existed.
+
+    The compiled mmwcas.so goes stale whenever mmwcas.pyx gains a parameter and
+    `make build` hasn't been re-run, and the failure lands mid-capture at arm
+    time. A 16-bit capture doesn't actually need the new argument, so retry
+    without it and carry on; a 12-bit request genuinely can't be honoured by an
+    old build, so fail with the fix instead of silently recording 16-bit data
+    that downstream would then try to unpack as 12-bit.
+    """
+    try:
+        return mmwcas.mmw_arming_tda(capture_dir, num_frames, prealloc_files,
+                                     packing)
+    except TypeError:
+        if packing:
+            raise RuntimeError(
+                "--data-packing 1 requires mmwcas to be rebuilt with "
+                "data_packing support - run: make build"
+            )
+        print("    NOTE: installed mmwcas predates the data_packing argument "
+              "(run `make build`);")
+        print("    continuing at 16-bit.")
+        return mmwcas.mmw_arming_tda(capture_dir, num_frames, prealloc_files)
+
+
 def _payload_sizes(files, cfg):
     """{data_filename: real payload bytes} for each captured device file.
 
@@ -639,10 +664,8 @@ def run_one_capture(exp_label, num_frames, tda_ip, prealloc_files=None,
 
     # Arm with headroom, not num_frames - the TDA window opens now but the
     # radar won't start for ~2.1 s (see TDA_ARM_FRAME_HEADROOM).
-    status = mmwcas.mmw_arming_tda(capture_dir,
-                                   num_frames + TDA_ARM_FRAME_HEADROOM,
-                                   prealloc_files,
-                                   _data_packing(config_dict))
+    status = _arm_tda(capture_dir, num_frames + TDA_ARM_FRAME_HEADROOM,
+                      prealloc_files, _data_packing(config_dict))
     if status != 0:
         print(f"mmw_arming_tda failed (status: {status})")
         return status, capture_dir
