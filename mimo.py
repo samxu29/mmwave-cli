@@ -8,28 +8,48 @@ idle-time scheme or antenna geometry preset without editing this file. Select
 a non-default preset with --radar-config <name>.
 
 FRAME DROPS (investigated 2026-07-24, bug/capture-frame-drop - READ THIS BEFORE
-RE-INVESTIGATING). This rig loses roughly 3-5% of requested frames, and that is
-its measured baseline, not a misconfiguration. Across nine 300-frame
-cascade_tx3_rx8 captures the count ranged 280-299 with no trend. The losses are
-always: single frames absent from an otherwise perfect 100 ms grid (each gap
-exactly 2.00 periods, surviving frames at median 100.01 ms), mid-capture rather
-than at the tail, and at IDENTICAL frame indices on master and slave - so a
-shared cause upstream of the per-device links.
+RE-INVESTIGATING). frame_sweep.py swept capture length 25..600 frames in
+randomised order and showed the shortfall is TWO SEPARATE mechanisms, which is
+why single-length measurements looked so noisy:
 
-RULED OUT BY EXPERIMENT - please don't re-litigate these without new evidence:
+  (A) A flat ~2 frames lost at EVERY length, with zero internal gaps in the
+      index - i.e. tail/edge truncation, not mid-capture loss. Independent of N,
+      so it is 6% of a 25-frame capture and 0.3% of a 600-frame one. This is the
+      whole story for short captures. TDA_ARM_FRAME_HEADROOM does not fix it.
+
+  (B) Internal mid-capture gaps that grow SUPERLINEARLY with length: mean 0.3,
+      2, 6, 28 missed slots at N = 100, 200, 300, 600. As a rate that is 1.0% at
+      200, 2.0% at 300, 4.7% at 600 - the per-frame hazard roughly doubles when
+      the capture doubles. Gaps are single frames absent from an otherwise
+      perfect 100 ms grid (each gap exactly 2.00 periods, survivors at median
+      100.01 ms) at IDENTICAL indices on master and slave, so the cause is
+      shared and upstream of the per-device links.
+
+PRIME SUSPECT for (B) is a producer/consumer RATE MISMATCH on the write path: a
+hazard that climbs with elapsed time is what a filling backlog looks like. Note
+this REVERSES an earlier "bandwidth ruled out" conclusion. That conclusion came
+from 12-bit packing making drops worse, but --data-packing also changes the
+TDA's packing path, so it was never a rate-only experiment. Use
+--frame-period-ms instead: it changes MB/s while holding frame count and
+bytes-per-frame identical. The 92 MB/s SSD figure used by the write-budget
+report is from dd with large sequential blocks, and is an optimistic proxy for
+what the real capture write path sustains.
+
+RULED OUT BY EXPERIMENT - don't re-litigate these without new evidence:
   * RF frame overrun / duty cycle: cascade_mimo at 35% duty (65 ms idle/frame)
     drops as much as cascade_tx3_rx8 at 98% (2.1 ms idle).
-  * Write bandwidth: LOWERING the rate made it worse - 12-bit packing cut
-    62.7 -> 47.0 MB/s and drops went from 1-7 up to 17.
   * SSD capacity: drive was 3-5% used throughout (430 GB free).
-  * SSD throughput: 3 GB written in 500 MB chunks holds a flat 92-101 MB/s, no
-    SLC-cache or thermal collapse.
   * Temperature: RF dies run 43->55 degC (rated ~125), and the TDA SoC does not
     even warm during a capture (69.8->69.4, 70.2->69.8, 70.6->70.6) - it sits at
     ~70 degC idle because capture is I/O-bound, not compute-bound.
   * Host wait time: +5 s of extra margin recovered nothing.
-  * TDA arm window: worth only ~2 frames of the shortfall (the tail), see
-    TDA_ARM_FRAME_HEADROOM.
+  * Session drift ACROSS captures: with run order randomised, drop rate vs
+    session elapsed time gave r = -0.06.
+
+SWEEP GOTCHAS: one pre-allocated file holds exactly 685 frames per device at
+this preset, so captures past ~685 cross a file boundary and add a confound.
+frame_sweep.py pools gap positions over both devices, so its reported position
+count is ~2x the real number of gaps.
 
 WHAT HELPED, MODESTLY: arming with numberOfFilesToAllocate > 0 so the TDA is not
 extending the capture file while frames stream in. Pooled means over identical
@@ -558,19 +578,24 @@ def _warn_on_frame_drops(files, num_frames, cfg):
         # known, and point at the one thing that actually helps: using the
         # per-frame timestamps instead of assuming uniform sampling.
         pct = max_dropped / num_frames * 100.0
-        print(f"     Frames are missing from an otherwise perfect frame grid, "
-              f"the same indices on")
-        print(f"     every device. ~3-5% is this rig's measured baseline "
-              f"(observed 280-299 of 300).")
-        print(f"     Ruled out by experiment: RF duty cycle, write bandwidth, "
-              f"SSD fill, SSD")
-        print(f"     throughput, RF die and TDA SoC temperature, host wait "
-              f"time. Do not retune")
-        print(f"     for it - see the FRAME DROPS notes in this file's "
-              f"docstring before retrying.")
-        if pct > 8.0:
-            print(f"     {pct:.1f}% is well above that baseline though, so "
-                  f"something IS different here.")
+        print(f"     Two known mechanisms (frame_sweep.py, 25-600 frames) - see "
+              f"this file's")
+        print(f"     FRAME DROPS docstring before retuning anything:")
+        print(f"       ~2 frames  lost at every length, no internal gap "
+              f"= tail truncation;")
+        print(f"       the rest   internal gaps growing faster than length "
+              f"(1.0% at 200 frames,")
+        print(f"                  2.0% at 300, 4.7% at 600) = suspected write-"
+              f"path backlog.")
+        expected = 2 + 0.85e-4 * num_frames ** 2
+        if max_dropped > 2.5 * expected:
+            print(f"     NOTE: {max_dropped} is well above the ~{expected:.0f} "
+                  f"this length usually loses,")
+            print(f"     so something is different about this run.")
+        print(f"     Ruled out: RF duty cycle, SSD fill, temperature, host wait "
+              f"time. NOT ruled")
+        print(f"     out: write-rate mismatch - test with --frame-period-ms "
+              f"(changes MB/s only).")
         print(f"     Inspect with:  python3 parse_idx.py --fetch <capture_dir>")
         print(f"     IMPORTANT: _idx.bin carries a timestamp per frame. "
               f"Downstream must place")
@@ -872,6 +897,18 @@ def main():
                         help='Named RF/geometry preset from radar_configs/*.toml '
                              f"(default: '{DEFAULT_RADAR_CONFIG}'). "
                              'Add new presets as .toml files there, not here.')
+    parser.add_argument('--frame-period-ms',
+                        type=float,
+                        default=None,
+                        help='Override the preset framePeriodicity (ms). This is '
+                             'the only knob that changes the required WRITE RATE '
+                             'while holding frame count and bytes-per-frame '
+                             'fixed, so it isolates a producer/consumer rate '
+                             'mismatch from a per-frame effect: doubling it '
+                             'halves MB/s but records the identical data. '
+                             'Diagnostic use - real captures should set the '
+                             'period in the preset so .mmwave.json and the '
+                             'downstream dt stay consistent.')
 
     args = parser.parse_args()
 
@@ -882,11 +919,19 @@ def main():
     if args.frames < 1:
         print("Error: --frames must be >= 1")
         sys.exit(1)
+    if args.frame_period_ms is not None and args.frame_period_ms <= 0:
+        print("Error: --frame-period-ms must be > 0")
+        sys.exit(1)
 
     # Select the RF/geometry preset (see radar_config.py) for this run.
     # deepcopy so CLI --frames can override TOML numFrames without mutating cache.
     global config_dict
     config_dict = copy.deepcopy(get_radar_config(args.radar_config))
+    if args.frame_period_ms is not None:
+        was = float(config_dict["mimo"]["frame"]["framePeriodicity"])
+        config_dict["mimo"]["frame"]["framePeriodicity"] = args.frame_period_ms
+        print(f"Frame period     : {args.frame_period_ms:.0f} ms "
+              f"(preset {was:.0f} ms) -- OVERRIDDEN, dt differs from the preset")
     period_ms = float(config_dict["mimo"]["frame"]["framePeriodicity"])
     period_s = period_ms / 1000.0
     config_dict["mimo"]["frame"]["numFrames"] = args.frames
