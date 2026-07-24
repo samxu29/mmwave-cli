@@ -59,20 +59,42 @@ def _frame_period_s(cfg):
     return float(cfg["mimo"]["frame"]["framePeriodicity"]) / 1000.0
 
 
+# Extra frames to arm the TDA with, on top of the N we actually want.
+#
+# The TDA's recording window is bounded by the numberOfFramesToCapture we arm
+# it with, and that window opens at ARM time - not when the master emits its
+# first frame, which is ~2.1 s later (post-arm settle plus the slaves-then-
+# master sequencing in mmw_start_frame()). A TDA armed for exactly N can
+# therefore close while the radar is still emitting the tail.
+#
+# SCOPE: this only fixes the small TAIL deficit, which parse_idx.py measured at
+# ~2 frames of a 20-frame shortfall. It is NOT the main frame-drop cause - the
+# other ~18 were mid-capture skips (see the note in _warn_on_frame_drops).
+# Cheap insurance, not a cure; do not read a clean 300 here as proof the drop
+# bug is solved without checking parse_idx.py for internal gaps.
+#
+# Arming with headroom costs nothing: the RF chips are still programmed with
+# frame.numFrames = N and self-stop after exactly N frames, so the extra
+# allowance is never filled - it only stops the TDA closing the window early.
+# The host wait below still bounds the session, and mmw_dearming_tda() ends
+# recording either way.
+TDA_ARM_FRAME_HEADROOM = 50
+
+
 def _wait_s_for_frames(num_frames, period_s):
     """Host wait after start_frame before de-arming the TDA.
 
     = N periods (the actual framing time) + a startup/flush margin.
 
-    The margin must cover the latency between start_frame() returning and the
+    The margin covers the latency between start_frame() returning and the
     master ACTUALLY emitting its first frame (slave-arm sleep, RPC round-trips,
-    first-frame calibration, PLL settle) PLUS TDA flush at the end. With only
-    one period (~0.1 s) of margin this latency (seconds, and variable run to
-    run) truncated the capture window, so de-arm cut the TDA off before the
-    radar finished all N frames - showing up as erratic "dropped frames" that
-    were really window truncation, not RF/SSD loss. A generous fixed margin
-    removes that artifact; the radar auto-stops at numFrames so waiting extra
-    is harmless (stop_frame() then just reports frame-already-ended)."""
+    first-frame calibration, PLL settle) PLUS TDA flush at the end. Necessary
+    but NOT sufficient on its own: raising it from one period to 5 s did not
+    recover any frames, because the binding constraint is the TDA's own
+    arm-time window, not this sleep - see TDA_ARM_FRAME_HEADROOM above. Keep
+    it generous anyway so de-arm never cuts off a still-running radar; the
+    radar auto-stops at numFrames so waiting extra is harmless (stop_frame()
+    then just reports frame-already-ended)."""
     return num_frames * period_s + period_s + 5.0
 
 
@@ -164,15 +186,17 @@ def _warn_on_frame_drops(files, num_frames, cfg):
     """
     Cross-check on-disk <dev>_0000_data.bin sizes against the requested frame
     count and print a prominent WARNING if the TDA wrote FEWER frames than
-    requested (dropped frames, not wall-clock jitter which is bounded to +/-1
-    frame). When frames are missing, also report the chirp-schedule duty cycle
-    and diagnose the likely cause: on this hardware the dominant cause is RF
-    FRAME OVERRUN (chirp schedule nearly fills framePeriodicity), not TDA->SSD
-    bandwidth - proven by the fact that halving the data rate (fewer RX) left
-    the drop rate unchanged, while the only low-duty-cycle preset
-    (cascade_mimo) stopped dropping. Each device file is checked independently
-    (per-device RX masks supported). Best-effort: silently returns if the
-    per-frame size can't be derived from cfg or no data files are present.
+    requested. When frames are missing, point at the cause the evidence
+    supports - the TDA capture window opening at arm time while the radar
+    starts ~2.1 s later, which TDA_ARM_FRAME_HEADROOM compensates for - and
+    refer to parse_idx.py to confirm from the TDA's own per-frame index
+    whether the gap is at the tail (truncation), internal (RF skip), or
+    scattered (throughput). Duty cycle is printed as context only: presets at
+    35% and 98% duty, differing 2x in write rate, both came up exactly
+    292/300, which rules out both RF overrun and SSD bandwidth as the
+    explanation. Each device file is checked independently (per-device RX
+    masks supported). Best-effort: silently returns if the per-frame size
+    can't be derived from cfg or no data files are present.
 
     Returns the number of dropped frames (max across device files, 0 if none).
     """
@@ -223,11 +247,38 @@ def _warn_on_frame_drops(files, num_frames, cfg):
     if max_dropped > 0:
         print(f"\n  ** WARNING: {max_dropped} frame(s) short of the requested "
               f"{num_frames}. **")
-        # Diagnose cause from the chirp schedule duty cycle. Empirically the
-        # dominant drop cause on this hardware is RF frame overrun (chirp
-        # schedule nearly fills framePeriodicity), NOT TDA->SSD bandwidth:
-        # halving the data rate (fewer RX) left the drop rate unchanged, while
-        # only the low-duty-cycle preset (cascade_mimo) stopped dropping.
+        # What the measurements actually show (parse_idx.py on the TDA's own
+        # per-frame index, 300-frame captures):
+        #   * The 100 ms frame grid is never disturbed - captured frames sit at
+        #     median 100.01 ms (min 99.97). Missing frames are simply ABSENT
+        #     from a perfect grid, each gap exactly 2.00 periods.
+        #   * Master and slaves lose the SAME frame indices => shared cause.
+        #   * Ruled out - RF frame overrun: cascade_mimo at 35% duty (65 ms
+        #     idle/frame) drops just as much as cascade_tx3_rx8 at 98%.
+        #   * Ruled out - raw bandwidth: 122 MB/s (4 dev) and 61 MB/s (2 dev)
+        #     both dropped 8; and the same preset varies 8/10/20 run to run.
+        # A perfect grid with random single frames vanishing, uncorrelated with
+        # data rate, is a LATENCY stall in the shared capture/write path, not a
+        # throughput ceiling and not RF scheduling. Prime suspect is the TDA
+        # SSD stalling (GC / journal flush) - note mimo.py never cleans
+        # /mnt/ssd, and drops got worse as the disk filled.
+        print(f"     Frames are missing from an otherwise perfect frame grid "
+              f"(shared across devices).")
+        print(f"     Ruled out by experiment: RF frame overrun (35% duty drops "
+              f"the same as 98%),")
+        print(f"     and raw bandwidth (122 vs 61 MB/s drop alike). Suspect a "
+              f"stall in the TDA")
+        print(f"     capture/write path - check free space + old captures on "
+              f"the TDA SSD:")
+        print(f"         ssh root@<tda> 'df -h /mnt/ssd; ls /mnt/ssd | wc -l'")
+        print(f"     Localise the losses with:  python3 parse_idx.py --fetch "
+              f"<capture_dir>")
+        print(f"     - internal gaps of k x period  = frames lost mid-capture "
+              f"(the main bug);")
+        print(f"     - shortfall only at the TAIL   = window truncation "
+              f"(TDA_ARM_FRAME_HEADROOM,")
+        print(f"                                      currently "
+              f"{TDA_ARM_FRAME_HEADROOM} frames).")
         active_us = _frame_active_time_us(cfg)
         try:
             period_ms = float(cfg["mimo"]["frame"]["framePeriodicity"])
@@ -236,27 +287,14 @@ def _warn_on_frame_drops(files, num_frames, cfg):
         if active_us is not None and period_ms:
             active_ms = active_us / 1000.0
             duty = active_ms / period_ms * 100.0
-            print(f"     Chirp schedule: {active_ms:.1f} ms active per "
-                  f"{period_ms:.0f} ms frame ({duty:.0f}% duty, "
-                  f"{period_ms - active_ms:.1f} ms idle).")
-            if duty >= 90.0:
-                print(f"     -> Almost certainly RF FRAME OVERRUN: the schedule "
-                      f"nearly fills (or")
-                print(f"        exceeds) framePeriodicity, so the device skips "
-                      f"frames. This is NOT")
-                print(f"        a bandwidth problem. Fix: raise framePeriodicity, "
-                      f"or shorten the")
-                print(f"        schedule (smaller idleTimes / rampEndTime / "
-                      f"numLoops).")
-            else:
-                print(f"     -> Schedule has headroom, so this is more likely a "
-                      f"TDA->SSD throughput")
-                print(f"        hiccup. Reduce the data rate (numLoops / RX / "
-                      f"ADC samples / fps).")
-        else:
-            print(f"     Check the chirp schedule vs framePeriodicity (frame "
-                  f"overrun) first, then")
-            print(f"     the TDA->SSD data rate.")
+            print(f"     Context - chirp schedule: {active_ms:.1f} ms active per "
+                  f"{period_ms:.0f} ms frame "
+                  f"({duty:.0f}% duty, {period_ms - active_ms:.1f} ms idle).")
+            if active_ms > period_ms:
+                print(f"     NOTE: schedule EXCEEDS framePeriodicity - that "
+                      f"genuinely cannot be honoured;")
+                print(f"     shorten idleTimes / rampEndTime / numLoops or raise "
+                      f"framePeriodicity.")
     elif any_sized:
         print(f"\n  OK: all RX-enabled device files contain the full "
               f"{num_frames} frame(s).")
@@ -376,7 +414,9 @@ def run_one_capture(exp_label, num_frames, tda_ip):
     print(f"\n>>> Capturing '{capture_dir}' — {num_frames} frames "
           f"(~{approx_s:.1f}s @ {period_s*1000:.0f} ms/frame) ...")
 
-    status = mmwcas.mmw_arming_tda(capture_dir, num_frames)
+    # Arm with headroom, not num_frames - the TDA window opens now but the
+    # radar won't start for ~2.1 s (see TDA_ARM_FRAME_HEADROOM).
+    status = mmwcas.mmw_arming_tda(capture_dir, num_frames + TDA_ARM_FRAME_HEADROOM)
     if status != 0:
         print(f"mmw_arming_tda failed (status: {status})")
         return status, capture_dir

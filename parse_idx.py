@@ -101,9 +101,45 @@ def _read_entries(path):
     for i in range(n_on_disk):
         vals = struct.unpack_from(_ENTRY_FMT, body, i * _ENTRY_SIZE)
         # vals: tag,ver,flags,w,h, meta0..3, size, timestamp, offset
-        entries.append({"size": vals[9], "timestamp": vals[10],
+        entries.append({"tag": vals[0], "version": vals[1], "flags": vals[2],
+                        "width": vals[3], "height": vals[4],
+                        "meta": list(vals[5:9]),
+                        "size": vals[9], "timestamp": vals[10],
                         "offset": vals[11]})
     return header, entries
+
+
+def _dump_fields(entries, gap_indices, context=2):
+    """Print every raw field for the frames bracketing each gap.
+
+    This is the RF-skip vs TDA-loss discriminator. If one of the meta words (or
+    flags) is the RF/CSI2 frame counter, then across a 2-period gap:
+      * counter advances by 1  -> the chip never emitted that frame (RF skipped
+        the trigger); nothing was lost downstream.
+      * counter advances by 2  -> the chip DID emit it and the TDA/write path
+        threw it away (capture-side loss).
+    Anything constant or equal to a geometry/size value is not a counter.
+    """
+    show = set()
+    for gi in gap_indices:
+        for j in range(gi - context, gi + context + 2):
+            if 0 <= j < len(entries):
+                show.add(j)
+    if not show:
+        return
+    print(f"\n  Raw fields around gaps (looking for a frame counter):")
+    print(f"    {'idx':>5} {'flags':>10} {'w':>5} {'h':>5} "
+          f"{'meta0':>10} {'meta1':>10} {'meta2':>10} {'meta3':>10} {'size':>10}")
+    prev = None
+    for j in sorted(show):
+        e = entries[j]
+        mark = "  <-- gap follows" if j in gap_indices else ""
+        if prev is not None and j != prev + 1:
+            print(f"    {'...':>5}")
+        print(f"    {j:>5} {e['flags']:>10} {e['width']:>5} {e['height']:>5} "
+              + " ".join(f"{m:>10}" for m in e["meta"])
+              + f" {e['size']:>10}{mark}")
+        prev = j
 
 
 def _median(xs):
@@ -114,7 +150,7 @@ def _median(xs):
     return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2.0
 
 
-def analyse(path, period_ms, requested_frames):
+def analyse(path, period_ms, requested_frames, dump_fields=False):
     header, entries = _read_entries(path)
     n = len(entries)
     print(f"\n{'='*66}")
@@ -176,6 +212,8 @@ def analyse(path, period_ms, requested_frames):
             print(f"      ... and {len(gaps) - 40} more")
         print("  -> internal gaps => RF frame skip / backpressure mid-capture,")
         print("     NOT tail truncation.")
+        if dump_fields:
+            _dump_fields(entries, [i for i, _ in gaps])
     else:
         print("\n  No internal gaps > 1.5x median: frames captured were evenly")
         print("  spaced. Any shortfall vs requested is a CLEAN EARLY STOP at the")
@@ -194,6 +232,10 @@ def main():
                     help="nominal framePeriodicity in ms (default 100)")
     ap.add_argument("--frames", type=int, default=0,
                     help="requested frame count, for the drop percentage")
+    ap.add_argument("--dump-fields", action="store_true",
+                    help="dump raw entry fields around each gap, to identify "
+                         "whether a frame counter jumps by 1 (RF never emitted "
+                         "the frame) or by 2 (TDA lost a frame it received)")
     args = ap.parse_args()
 
     paths = list(args.idx_files)
@@ -205,7 +247,8 @@ def main():
     counts = []
     for p in paths:
         try:
-            counts.append(analyse(p, args.period_ms, args.frames))
+            counts.append(analyse(p, args.period_ms, args.frames,
+                                  dump_fields=args.dump_fields))
         except (OSError, ValueError) as e:
             print(f"\n{p}: ERROR {e}", file=sys.stderr)
 
