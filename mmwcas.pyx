@@ -940,12 +940,26 @@ cpdef int mmw_reconfigure_frame_count(int num_frames):
 
     return status
 
-cpdef int mmw_arming_tda(str capture_path, int num_frames=-1):
+cpdef int mmw_arming_tda(str capture_path, int num_frames=-1, int num_files=0):
     """@brief Prepare the TDA board and notify TDA about the start of recording
     * @capture_path capture path setup to arm the TDA for recording
     * @num_frames frames for TDA to record (-1 = use config.frameCfg.numFrames;
     *             0 = unlimited until stop). Used by interactive mode so each
     *             capture can request a different length without reconfiguring RF.
+    * @num_files  files to PRE-ALLOCATE on the TDA SSD before recording starts
+    *             (numberOfFilesToAllocate). 0 = don't pre-allocate, which means
+    *             the TDA extends the capture file on the fly as frames stream
+    *             in; that filesystem work sits on the write path and shows up
+    *             as random single dropped frames. TI's own Cascade_Capture.lua
+    *             says of this field: "the number of files to preallocate on the
+    *             SSD. This improves capture reliability by not having frame
+    *             drops while switching files. The tradeoff is that each file is
+    *             a fixed 2047 MB even if a smaller number of frames are
+    *             captured." So a non-zero value trades disk space for
+    *             reliability - mimo.py sizes it from the capture (see
+    *             _tda_prealloc_files there / --tda-prealloc-files).
+    *             Kept at 0 by default so this signature stays backwards
+    *             compatible with callers that don't pass it.
     * @return int
     """
     cdef int status = 0
@@ -962,7 +976,7 @@ cpdef int mmw_arming_tda(str capture_path, int num_frames=-1):
     cdef rlTdaArmCfg_t tdaCfg
     tdaCfg.captureDirectory = <unsigned char*>capture_path_buf
     tdaCfg.framePeriodicity = frame_period_ms
-    tdaCfg.numberOfFilesToAllocate = 0
+    tdaCfg.numberOfFilesToAllocate = <unsigned int>num_files
     if num_frames < 0:
         tdaCfg.numberOfFramesToCapture = config.frameCfg.numFrames
     else:

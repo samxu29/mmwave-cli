@@ -163,6 +163,51 @@ def _frame_active_time_us(cfg):
         return None
 
 
+# Each file the TDA pre-allocates is a fixed 2047 MB (TI's Cascade_Capture.lua).
+TDA_PREALLOC_FILE_BYTES = 2047 * 1024 * 1024
+
+# Bytes of the TDA's <dev>_0000_idx.bin: a 24-byte file header followed by one
+# 48-byte entry per frame the TDA ACTUALLY captured. That entry count is the
+# authoritative frame count - unlike the data file it can't be inflated by
+# pre-allocation padding. See parse_idx.py for the full struct layout.
+_IDX_HEADER_BYTES = 24
+_IDX_ENTRY_BYTES = 48
+
+
+def _tda_prealloc_files(cfg, num_frames):
+    """How many files to have the TDA pre-allocate for this capture.
+
+    Zero pre-allocation (the previous hard-coded behaviour) makes the TDA grow
+    the capture file as frames stream in, and that filesystem extension work
+    lands on the write path - the measured result was random single frames
+    vanishing from an otherwise perfect frame grid, identically on every
+    device, at a rate independent of data rate (so neither a bandwidth ceiling
+    nor RF scheduling). TI documents this field as the fix in
+    Cascade_Capture.lua: "the number of files to preallocate on the SSD. This
+    improves capture reliability by not having frame drops while switching
+    files. The tradeoff is that each file is a fixed 2047 MB even if a smaller
+    number of frames are captured."
+
+    Sized off the LARGEST per-device stream (each device writes its own file),
+    rounded up, floor of 1. Returns 1 if the per-frame size is unknown.
+    """
+    per_dev = [_expected_bytes_per_frame_for_device(cfg, d) for d in range(4)]
+    bpf = max((b for b in per_dev if b), default=None)
+    if not bpf:
+        return 1
+    total = bpf * max(int(num_frames), 1)
+    return max(1, -(-total // TDA_PREALLOC_FILE_BYTES))   # ceil division
+
+
+def _frames_from_idx_size(size):
+    """Frames the TDA indexed, from an <dev>_0000_idx.bin byte size.
+    Returns None if the size can't hold a header + at least one entry."""
+    body = int(size) - _IDX_HEADER_BYTES
+    if body < _IDX_ENTRY_BYTES:
+        return None
+    return body // _IDX_ENTRY_BYTES
+
+
 def _dev_id_from_data_bin(name):
     """Parse leading device index from e.g. 'master_0000_data.bin' /
     'slave1_0000_data.bin' / '0_0000_data.bin'. Returns None if unknown."""
@@ -205,6 +250,18 @@ def _warn_on_frame_drops(files, num_frames, cfg):
     if not data_files:
         return 0
 
+    # Frames the TDA indexed, per device. Authoritative: unlike the data file,
+    # idx.bin is one entry per captured frame and is never inflated by
+    # pre-allocation padding.
+    idx_frames = {}
+    for name, size in files:
+        if not name.endswith("_idx.bin") or not str(size).isdigit():
+            continue
+        dev_id = _dev_id_from_data_bin(name)
+        n = _frames_from_idx_size(size)
+        if dev_id is not None and n is not None:
+            idx_frames[dev_id] = n
+
     max_dropped = 0
     lines = []
     any_sized = False
@@ -224,16 +281,24 @@ def _warn_on_frame_drops(files, num_frames, cfg):
         any_sized = True
         whole = size // bpf
         partial = (size % bpf) != 0
-        dropped = num_frames - whole
+        # Prefer the index count; fall back to size/bytes-per-frame.
+        indexed = idx_frames.get(dev_id)
+        counted = indexed if indexed is not None else whole
+        dropped = num_frames - counted
         if dropped > 0:
             max_dropped = max(max_dropped, dropped)
         note = ""
         if dropped > 0:
             note = f"   <-- {dropped} dropped ({dropped / num_frames * 100:.1f}%)"
-        elif partial:
+        elif partial and indexed is None:
             note = "   <-- trailing partial frame"
-        lines.append(f"    {name:28s} {whole:>5d} frame(s)"
-                     + ("+partial" if partial else "        ") + note)
+        src = "idx" if indexed is not None else "size"
+        detail = ""
+        if indexed is not None and indexed != whole:
+            # Expected when pre-allocating: the file is padded to a fixed size.
+            detail = f" (data file holds {whole})"
+        lines.append(f"    {name:28s} {counted:>5d} frame(s) [{src}]"
+                     + detail + note)
 
     if not lines:
         return 0
@@ -372,7 +437,7 @@ def save_ir_timestamps(capture_dir):
     return path
 
 
-def run_one_capture(exp_label, num_frames, tda_ip):
+def run_one_capture(exp_label, num_frames, tda_ip, prealloc_files=None):
     """
     Arm the TDA, record one capture, de-arm, then verify + export the
     .mmwave.json sidecar. Same division of responsibility as mimo.c's
@@ -414,9 +479,20 @@ def run_one_capture(exp_label, num_frames, tda_ip):
     print(f"\n>>> Capturing '{capture_dir}' — {num_frames} frames "
           f"(~{approx_s:.1f}s @ {period_s*1000:.0f} ms/frame) ...")
 
+    if prealloc_files is None:
+        prealloc_files = _tda_prealloc_files(config_dict, num_frames)
+    if prealloc_files:
+        print(f"    TDA pre-allocating {prealloc_files} file(s) "
+              f"({prealloc_files * TDA_PREALLOC_FILE_BYTES / (1 << 30):.1f} GiB "
+              f"reserved per device) to keep file growth off the write path.")
+    else:
+        print(f"    TDA pre-allocation DISABLED - expect random dropped frames.")
+
     # Arm with headroom, not num_frames - the TDA window opens now but the
     # radar won't start for ~2.1 s (see TDA_ARM_FRAME_HEADROOM).
-    status = mmwcas.mmw_arming_tda(capture_dir, num_frames + TDA_ARM_FRAME_HEADROOM)
+    status = mmwcas.mmw_arming_tda(capture_dir,
+                                   num_frames + TDA_ARM_FRAME_HEADROOM,
+                                   prealloc_files)
     if status != 0:
         print(f"mmw_arming_tda failed (status: {status})")
         return status, capture_dir
@@ -511,6 +587,15 @@ def main():
                         type=int,
                         default=200,
                         help='IR sensor software debounce window in ms (default: 200)')
+    parser.add_argument('--tda-prealloc-files',
+                        type=int,
+                        default=-1,
+                        help='Files for the TDA to pre-allocate on its SSD before '
+                             'recording (numberOfFilesToAllocate). -1 = auto-size '
+                             'from the capture (default), 0 = disable. Each file '
+                             'reserves a fixed 2047 MB. Without pre-allocation the '
+                             'TDA grows the file while frames stream in and drops '
+                             'random frames; use 0 only to A/B test that.')
     parser.add_argument('--radar-config',
                         type=str,
                         default=DEFAULT_RADAR_CONFIG,
@@ -572,7 +657,10 @@ def main():
     print("="*60)
 
     try:
-        status, capture_dir = run_one_capture(args.directory, args.frames, args.tda_ip)
+        prealloc = (None if args.tda_prealloc_files < 0
+                    else args.tda_prealloc_files)
+        status, capture_dir = run_one_capture(args.directory, args.frames,
+                                             args.tda_ip, prealloc)
         if status != 0:
             sys.exit(1)
 
