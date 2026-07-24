@@ -17,27 +17,32 @@ why single-length measurements looked so noisy:
       so it is 6% of a 25-frame capture and 0.3% of a 600-frame one. This is the
       whole story for short captures. TDA_ARM_FRAME_HEADROOM does not fix it.
 
-  (B) Internal mid-capture gaps that grow SUPERLINEARLY with length: mean 0.3,
-      2, 6, 28 missed slots at N = 100, 200, 300, 600. As a rate that is 1.0% at
-      200, 2.0% at 300, 4.7% at 600 - the per-frame hazard roughly doubles when
-      the capture doubles. Gaps are single frames absent from an otherwise
-      perfect 100 ms grid (each gap exactly 2.00 periods, survivors at median
-      100.01 ms) at IDENTICAL indices on master and slave, so the cause is
-      shared and upstream of the per-device links.
+  (B) A handful of internal mid-capture gaps, single frames absent from an
+      otherwise perfect grid (each gap exactly 2.00 periods, survivors at median
+      100.01 ms) at IDENTICAL indices on master and slave - so a shared cause
+      upstream of the per-device links. Typically 1-2% of frames, with large
+      run-to-run scatter and NO established scaling law (see below).
 
-PRIME SUSPECT for (B) is a producer/consumer RATE MISMATCH on the write path: a
-hazard that climbs with elapsed time is what a filling backlog looks like. Note
-this REVERSES an earlier "bandwidth ruled out" conclusion. That conclusion came
-from 12-bit packing making drops worse, but --data-packing also changes the
-TDA's packing path, so it was never a rate-only experiment. Use
---frame-period-ms instead: it changes MB/s while holding frame count and
-bytes-per-frame identical. The 92 MB/s SSD figure used by the write-budget
-report is from dd with large sequential blocks, and is an optimistic proxy for
-what the real capture write path sustains.
+HOW (B) SCALES IS STILL OPEN. The sweep reported it growing superlinearly (0.3,
+2, 6, 28 missed slots at N = 100, 200, 300, 600), but the 600-frame points are
+not trustworthy: standalone 600-frame captures of the same preset lose ~5, not
+28-32. The sweep deleted each capture immediately before the next one ran, so
+the discard work from freeing ~4 GiB was landing inside the following capture.
+frame_sweep.py now defers all deletion to the end; the sweep needs re-running
+before any scaling claim is made.
 
 RULED OUT BY EXPERIMENT - don't re-litigate these without new evidence:
   * RF frame overrun / duty cycle: cascade_mimo at 35% duty (65 ms idle/frame)
     drops as much as cascade_tx3_rx8 at 98% (2.1 ms idle).
+  * WRITE RATE / bandwidth. The decisive test holds frame count and bytes per
+    frame fixed and changes only MB/s via --frame-period-ms: 600 frames at
+    100 ms (62.7 MB/s) lost 5 internal frames, and at 200 ms (31.3 MB/s) lost 7.
+    Halving the data rate changed nothing, so this is not a throughput or
+    backlog problem. (An earlier 12-bit-packing test pointed the same way but
+    was not clean, since --data-packing also changes the TDA packing path.)
+  * ELAPSED TIME. That same pair doubled capture duration from 60 s to 120 s at
+    identical frame count and saw no increase - the hazard tracks FRAMES, not
+    seconds.
   * SSD capacity: drive was 3-5% used throughout (430 GB free).
   * Temperature: RF dies run 43->55 degC (rated ~125), and the TDA SoC does not
     even warm during a capture (69.8->69.4, 70.2->69.8, 70.6->70.6) - it sits at
@@ -46,10 +51,12 @@ RULED OUT BY EXPERIMENT - don't re-litigate these without new evidence:
   * Session drift ACROSS captures: with run order randomised, drop rate vs
     session elapsed time gave r = -0.06.
 
-SWEEP GOTCHAS: one pre-allocated file holds exactly 685 frames per device at
-this preset, so captures past ~685 cross a file boundary and add a confound.
-frame_sweep.py pools gap positions over both devices, so its reported position
-count is ~2x the real number of gaps.
+GOTCHAS FOR THE NEXT EXPERIMENT: one pre-allocated file holds exactly 685 frames
+per device at this preset, so captures past ~685 cross a file boundary and add a
+confound. frame_sweep.py pools gap positions over both devices, so its reported
+position count is ~2x the real number of gaps. And measure standalone captures
+before trusting any batch harness - the harness contaminated its own results
+once already.
 
 WHAT HELPED, MODESTLY: arming with numberOfFilesToAllocate > 0 so the TDA is not
 extending the capture file while frames stream in. Pooled means over identical
@@ -578,24 +585,19 @@ def _warn_on_frame_drops(files, num_frames, cfg):
         # known, and point at the one thing that actually helps: using the
         # per-frame timestamps instead of assuming uniform sampling.
         pct = max_dropped / num_frames * 100.0
-        print(f"     Two known mechanisms (frame_sweep.py, 25-600 frames) - see "
-              f"this file's")
-        print(f"     FRAME DROPS docstring before retuning anything:")
-        print(f"       ~2 frames  lost at every length, no internal gap "
-              f"= tail truncation;")
-        print(f"       the rest   internal gaps growing faster than length "
-              f"(1.0% at 200 frames,")
-        print(f"                  2.0% at 300, 4.7% at 600) = suspected write-"
-              f"path backlog.")
-        expected = 2 + 0.85e-4 * num_frames ** 2
-        if max_dropped > 2.5 * expected:
-            print(f"     NOTE: {max_dropped} is well above the ~{expected:.0f} "
-                  f"this length usually loses,")
-            print(f"     so something is different about this run.")
-        print(f"     Ruled out: RF duty cycle, SSD fill, temperature, host wait "
-              f"time. NOT ruled")
-        print(f"     out: write-rate mismatch - test with --frame-period-ms "
-              f"(changes MB/s only).")
+        print(f"     Two known mechanisms (see this file's FRAME DROPS "
+              f"docstring before retuning):")
+        print(f"       ~2 frames  lost at every capture length with no internal "
+              f"gap = tail")
+        print(f"                  truncation, the whole story for short "
+              f"captures;")
+        print(f"       the rest   internal single-frame gaps, ~1-2%, same "
+              f"indices on every")
+        print(f"                  device, cause still unknown.")
+        print(f"     Ruled out: write rate (600 frames at half the MB/s dropped "
+              f"the same),")
+        print(f"     elapsed time, RF duty cycle, SSD fill, temperature, host "
+              f"wait time.")
         print(f"     Inspect with:  python3 parse_idx.py --fetch <capture_dir>")
         print(f"     IMPORTANT: _idx.bin carries a timestamp per frame. "
               f"Downstream must place")

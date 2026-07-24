@@ -33,6 +33,15 @@ EXPERIMENTAL DESIGN - read before changing:
     above. Default 3; use more if the summary says the spread swamps the trend.
   * Frame counts come from the TDA's own idx ledger (parse_idx._read_entries),
     never from data-file size, which pre-allocation inflates.
+  * CAPTURES ARE DELETED ONLY AT THE END, never between runs. The first version
+    of this script deleted each capture as soon as its index was read, which
+    placed a ~4 GiB rm -rf of pre-allocated files immediately before the next
+    capture; the resulting filesystem/SSD discard work perturbed the very thing
+    being measured. It was caught by 600-frame sweep runs losing 32 and 28
+    frames while a standalone 600-frame capture lost 7. Anything this script
+    does between captures must be assumed to contaminate them until proven
+    otherwise. Budget SSD space accordingly: roughly
+    sum(frames) x 3.1 MB x n_devices (~24 GB for the default grid).
 
 USAGE:
     # default sweep: 25/50/100/200/300 frames x 3 repeats, randomised (~15 min)
@@ -324,16 +333,15 @@ def main():
     ap.add_argument("--radar-config", default="cascade_tx3_rx8")
     ap.add_argument("--tda-ip", default="192.168.33.180")
     ap.add_argument("--label", default="sweep")
-    ap.add_argument("--extra-args", default="--no-reclaim-padding",
-                    help="extra flags passed through to mimo.py (default "
-                         "'--no-reclaim-padding' - the capture is deleted "
-                         "afterwards, so trimming it first is wasted time)")
+    ap.add_argument("--extra-args", default="",
+                    help="extra flags passed through to mimo.py, e.g. "
+                         "'--frame-period-ms 200' or '--tda-prealloc-files 0'")
     ap.add_argument("--seed", type=int, default=0,
                     help="RNG seed for the run order (fixed so a sweep is "
                          "reproducible)")
     ap.add_argument("--keep", action="store_true",
-                    help="keep captures on the TDA (default deletes each one "
-                         "after reading its index, to protect SSD space)")
+                    help="keep captures on the TDA (default deletes them all "
+                         "once the sweep has finished, never mid-sweep)")
     args = ap.parse_args()
 
     lengths = [int(x) for x in args.frames.split(",") if x.strip()]
@@ -355,6 +363,7 @@ def main():
 
     t0 = time.time()
     rows = []
+    captured_dirs = []
     for i, (n, rep) in enumerate(grid, 1):
         elapsed_min = (time.time() - t0) / 60.0
         print(f"\n[{i}/{len(grid)}] {n} frames, repeat {rep} "
@@ -366,8 +375,7 @@ def main():
             continue
         idx_paths = _fetch_idx(capture_dir, args.tda_ip,
                                os.path.join(RESULTS_DIR, capture_dir))
-        if not args.keep:
-            _delete_capture(capture_dir, args.tda_ip)
+        captured_dirs.append(capture_dir)
         if not idx_paths:
             print(f"  no index files retrieved - skipping this point")
             continue
@@ -381,6 +389,20 @@ def main():
         rows.append(res)
         print(f"  captured {res['captured']}/{n}  "
               f"({res['dropped']} dropped, {res['pct']:.2f}%)")
+
+    # Cleanup is deferred to here ON PURPOSE. Deleting each capture right after
+    # reading it - the original behaviour - put a ~4 GiB rm -rf of pre-allocated
+    # files immediately before every subsequent capture, and that freeing work
+    # (filesystem + SSD discard) can still be in flight when the next capture
+    # starts. It showed: sweep runs at 600 frames lost 32 and 28 frames while a
+    # standalone 600-frame capture of the same preset lost 7. The sweep was
+    # measuring its own cleanup. Deleting only at the end costs SSD space during
+    # the run but leaves every capture preceded by the same idle TDA.
+    if captured_dirs and not args.keep:
+        print(f"\nDeleting {len(captured_dirs)} capture(s) from the TDA "
+              f"(deferred to the end so cleanup cannot perturb a capture) ...")
+        for d in captured_dirs:
+            _delete_capture(d, args.tda_ip)
 
     if not rows:
         print("\nNo successful runs - nothing to summarise.")
