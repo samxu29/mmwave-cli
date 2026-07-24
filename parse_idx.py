@@ -196,6 +196,18 @@ def analyse(path, period_ms, requested_frames, dump_fields=False):
         print(f"  data stride        : VARIES {sorted(strides)} B "
               f"(partial/short frame present)")
 
+    # Where the real payload lives inside the (possibly pre-allocated and
+    # therefore padded-to-2047MB) data file. If it starts at 0 and the stride is
+    # constant, everything past live_end is padding and can be truncated away
+    # before transfer without losing a frame.
+    live_end = off[-1] + entries[-1]["size"]
+    contiguous = len(strides) == 1 and off[0] == 0
+    print(f"  payload extent     : offset {off[0]:,} .. {live_end:,} B"
+          + ("  [contiguous from 0]" if contiguous else "  [NOT contiguous from 0]"))
+    if contiguous:
+        print(f"  -> safe to reclaim padding:  truncate -s {live_end} "
+              f"<dev>_0000_data.bin")
+
     # Gap hunt: any inter-frame delta well above median = missed trigger(s).
     thresh = med * 1.5
     gaps = [(i, deltas[i]) for i in range(len(deltas)) if deltas[i] > thresh]

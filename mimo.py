@@ -166,6 +166,12 @@ def _frame_active_time_us(cfg):
 # Each file the TDA pre-allocates is a fixed 2047 MB (TI's Cascade_Capture.lua).
 TDA_PREALLOC_FILE_BYTES = 2047 * 1024 * 1024
 
+# Shortfall (frames) treated as the known tail effect rather than the drop bug.
+# With file pre-allocation on, a 300-frame capture lands at 299-300; the old
+# no-prealloc path lost 8-20 scattered mid-capture. Anything above this is worth
+# the full diagnosis.
+FRAME_SHORTFALL_NOISE_FLOOR = 2
+
 # Bytes of the TDA's <dev>_0000_idx.bin: a 24-byte file header followed by one
 # 48-byte entry per frame the TDA ACTUALLY captured. That entry count is the
 # authoritative frame count - unlike the data file it can't be inflated by
@@ -309,7 +315,15 @@ def _warn_on_frame_drops(files, num_frames, cfg):
     print(f"{'-'*60}")
     for ln in lines:
         print(ln)
-    if max_dropped > 0:
+    if 0 < max_dropped <= FRAME_SHORTFALL_NOISE_FLOOR:
+        # A frame or two short is the residual tail effect, not the drop bug
+        # (which cost 8-20 frames scattered mid-capture). Don't bury it in the
+        # full diagnosis - just say so.
+        print(f"\n  NOTE: {max_dropped} frame(s) short of {num_frames} - within "
+              f"the {FRAME_SHORTFALL_NOISE_FLOOR}-frame")
+        print(f"  tail allowance. Run parse_idx.py if you need to confirm there "
+              f"are no internal gaps.")
+    elif max_dropped > 0:
         print(f"\n  ** WARNING: {max_dropped} frame(s) short of the requested "
               f"{num_frames}. **")
         # What the measurements actually show (parse_idx.py on the TDA's own
