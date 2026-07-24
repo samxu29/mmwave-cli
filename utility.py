@@ -170,12 +170,17 @@ def truncate_capture_padding(targets, capture_dir, tda_ip="192.168.33.180"):
             continue
         # Only shrink: compare against the live size on the TDA itself, so a
         # stale/incorrect target can't eat data.
+        # stat reads the size from the inode. Do NOT use `wc -c` here: busybox
+        # wc streams the whole file to count bytes, so guarding a 2 GiB
+        # pre-allocated file that way reads 2 GiB off the SSD per device and
+        # times the reclaim out before it truncates anything.
         cmds.append(
-            f'cur=$(wc -c < "{path}" 2>/dev/null || echo 0); '
+            f'cur=$(stat -c %s "{path}" 2>/dev/null || echo 0); '
             f'if [ "$cur" -gt {size} ]; then '
             f'truncate -s {size} "{path}" 2>/dev/null || '
             f'dd if=/dev/null of="{path}" bs=1 seek={size} conv=trunc 2>/dev/null; '
-            f'echo "  {base}: $cur -> {size}"; fi'
+            f'echo "  {base}: $cur -> $(stat -c %s "{path}" 2>/dev/null)"; '
+            f'else echo "  {base}: left as-is (size $cur)"; fi'
         )
     if not cmds:
         return False
