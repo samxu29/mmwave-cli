@@ -133,6 +133,81 @@ def check_captured_files(capture_dir, tda_ip="192.168.33.180", retries=4, retry_
         return False, 0, []
 
 
+def truncate_capture_padding(targets, capture_dir, tda_ip="192.168.33.180"):
+    """
+    Shrink pre-allocated capture files on the TDA down to their real payload.
+
+    Arming the TDA with numberOfFilesToAllocate > 0 is what stops it dropping
+    frames (it no longer has to extend the file while frames stream in), but TI
+    fixes each pre-allocated file at 2047 MB regardless of how many frames were
+    actually recorded - so a 300-frame capture writes ~940 MB of data inside a
+    2.0 GiB file. Left alone that doubles what pipeline.py has to SCP.
+
+    Truncating is safe because the frames are written contiguously from offset 0
+    with a constant stride (verified via parse_idx.py: "payload extent: offset 0
+    .. N [contiguous from 0]", and the idx header's own dataFileSize agrees with
+    frames x bytes-per-frame exactly). Everything past the payload is untouched
+    pre-allocation, not data.
+
+    targets: {remote_filename: payload_bytes}. Entries are SKIPPED unless the
+    file is currently LARGER than payload_bytes, so this can only ever remove
+    padding - it will never truncate into real frames, and re-running is a
+    no-op. busybox `truncate` is used when present, with a `dd conv=trunc`
+    fallback for TDA images that lack it.
+
+    Returns True if the remote command ran, False otherwise (never raises - a
+    failed reclaim must not fail an otherwise good capture).
+    """
+    if not targets:
+        return False
+
+    cmds = []
+    for name, size in sorted(targets.items()):
+        base = str(name).split("/")[-1]
+        path = f"/mnt/ssd/{capture_dir}/{base}"
+        size = int(size)
+        if size <= 0:
+            continue
+        # Only shrink: compare against the live size on the TDA itself, so a
+        # stale/incorrect target can't eat data.
+        cmds.append(
+            f'cur=$(wc -c < "{path}" 2>/dev/null || echo 0); '
+            f'if [ "$cur" -gt {size} ]; then '
+            f'truncate -s {size} "{path}" 2>/dev/null || '
+            f'dd if=/dev/null of="{path}" bs=1 seek={size} conv=trunc 2>/dev/null; '
+            f'echo "  {base}: $cur -> {size}"; fi'
+        )
+    if not cmds:
+        return False
+
+    ssh_cmd = [
+        "ssh",
+        "-oHostKeyAlgorithms=+ssh-rsa",
+        "-oPubkeyAcceptedAlgorithms=+ssh-rsa",
+        "-oStrictHostKeyChecking=no",
+        "-oConnectTimeout=10",
+        f"root@{tda_ip}",
+        "; ".join(cmds),
+    ]
+    try:
+        result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=60)
+        if result.returncode != 0:
+            print(f"\n WARNING: Failed to reclaim pre-allocation padding: "
+                  f"{result.stderr.strip()}")
+            return False
+        out = result.stdout.strip()
+        if out:
+            print(f"\n Reclaimed pre-allocation padding on the TDA:")
+            print(out)
+        return True
+    except subprocess.TimeoutExpired:
+        print(f"\n WARNING: Padding reclaim timed out.")
+        return False
+    except Exception as e:
+        print(f"\n WARNING: Failed to reclaim pre-allocation padding: {e}")
+        return False
+
+
 def upload_files_to_tda(local_paths, capture_dir, tda_ip="192.168.33.180"):
     """
     SCP local metadata files (IR timestamps .npy, .mmwave.json config) up

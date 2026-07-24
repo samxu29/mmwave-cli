@@ -7,6 +7,24 @@ frame timing) has moved OUT of this file and into radar_config.py
 idle-time scheme or antenna geometry preset without editing this file. Select
 a non-default preset with --radar-config <name>.
 
+FRAME DROPS / TDA FILE PRE-ALLOCATION (2026-07-24): the TDA must be armed with
+numberOfFilesToAllocate > 0. With 0 (the old hard-coded value) it grows the
+capture file while frames stream in, and that filesystem work on the write path
+silently loses whole frames - measured 8-20 missing out of 300, scattered
+mid-capture, identically on every device. Measured A/B on identical back-to-back
+300-frame captures: pre-allocation ON -> 299 frames, zero internal gaps, period
+99.88-100.13 ms; OFF -> 284 frames, 16 scattered gaps of exactly 2x the period.
+It is NOT an RF or bandwidth problem: a 35%-duty preset drops the same as a
+98%-duty one, 122 MB/s drops the same as 61 MB/s, and the SSD was 3% full
+throughout. mimo.py sizes the allocation automatically (_tda_prealloc_files);
+--tda-prealloc-files 0 restores the broken behaviour for A/B testing only.
+Because TI fixes each pre-allocated file at 2047 MB no matter how many frames
+land in it, the padding is trimmed back to the real payload after each capture
+(--no-reclaim-padding to keep it). Frame counts therefore come from
+<dev>_0000_idx.bin (24-byte header + 48 bytes/frame), never from the data file
+size, which pre-allocation inflates. Use parse_idx.py to inspect per-frame
+timestamps when a capture looks short.
+
 Capture length is defined by FRAME COUNT (--frames), not wall-clock seconds.
 The radar + TDA are programmed with that numFrames so they stop after exactly
 N frames (e.g. 300 frames @ 100 ms period ≈ 30 s). Host sleep is only
@@ -50,6 +68,7 @@ from utility import export_config_to_json
 from utility import check_captured_files
 from utility import signal_handler
 from utility import upload_files_to_tda
+from utility import truncate_capture_padding
 from radar_config import RADAR_CONFIGS, DEFAULT_RADAR_CONFIG, get_radar_config
 import os
 
@@ -231,6 +250,39 @@ def _dev_id_from_data_bin(name):
     if head.isdigit():
         return int(head)
     return None
+
+
+def _payload_sizes(files, cfg):
+    """{data_filename: real payload bytes} for each captured device file.
+
+    Payload = frames the TDA indexed (from <dev>_0000_idx.bin) x that device's
+    bytes-per-frame. Used to trim pre-allocation padding; files whose frame
+    count or per-frame size can't be resolved are omitted, so an unknown never
+    turns into a truncation.
+    """
+    idx_frames = {}
+    for name, size in files:
+        if not name.endswith("_idx.bin") or not str(size).isdigit():
+            continue
+        dev_id = _dev_id_from_data_bin(name)
+        n = _frames_from_idx_size(size)
+        if dev_id is not None and n:
+            idx_frames[dev_id] = n
+
+    targets = {}
+    for name, size in files:
+        if not name.endswith("_data.bin") or not str(size).isdigit():
+            continue
+        dev_id = _dev_id_from_data_bin(name)
+        if dev_id is None or dev_id not in idx_frames:
+            continue
+        bpf = _expected_bytes_per_frame_for_device(cfg, dev_id)
+        if not bpf:
+            continue
+        payload = idx_frames[dev_id] * bpf
+        if 0 < payload < int(size):
+            targets[name] = payload
+    return targets
 
 
 def _warn_on_frame_drops(files, num_frames, cfg):
@@ -451,7 +503,8 @@ def save_ir_timestamps(capture_dir):
     return path
 
 
-def run_one_capture(exp_label, num_frames, tda_ip, prealloc_files=None):
+def run_one_capture(exp_label, num_frames, tda_ip, prealloc_files=None,
+                    reclaim_padding=True):
     """
     Arm the TDA, record one capture, de-arm, then verify + export the
     .mmwave.json sidecar. Same division of responsibility as mimo.c's
@@ -558,6 +611,12 @@ def run_one_capture(exp_label, num_frames, tda_ip, prealloc_files=None):
     # still usable, just shorter than asked for.
     _warn_on_frame_drops(files, num_frames, config_dict)
 
+    # Give back the pre-allocation padding (each reserved file is a fixed
+    # 2047 MB) so pipeline.py only transfers real frames.
+    if reclaim_padding:
+        truncate_capture_padding(_payload_sizes(files, config_dict),
+                                 capture_dir, tda_ip)
+
     # Generate configuration JSON file only if capture was successful
     json_filename = os.path.join("mmwave_json_files", f"{capture_dir}.mmwave.json")
     print(f"\nGenerating configuration file: {json_filename}")
@@ -610,6 +669,13 @@ def main():
                              'reserves a fixed 2047 MB. Without pre-allocation the '
                              'TDA grows the file while frames stream in and drops '
                              'random frames; use 0 only to A/B test that.')
+    parser.add_argument('--no-reclaim-padding',
+                        action='store_true',
+                        help='Leave pre-allocated capture files at their full '
+                             'reserved size instead of truncating them down to the '
+                             'frames actually recorded. Only shrinks files, never '
+                             'grows them; disable if you want the raw 2047 MB '
+                             'files as the TDA wrote them.')
     parser.add_argument('--radar-config',
                         type=str,
                         default=DEFAULT_RADAR_CONFIG,
@@ -674,7 +740,8 @@ def main():
         prealloc = (None if args.tda_prealloc_files < 0
                     else args.tda_prealloc_files)
         status, capture_dir = run_one_capture(args.directory, args.frames,
-                                             args.tda_ip, prealloc)
+                                             args.tda_ip, prealloc,
+                                             not args.no_reclaim_padding)
         if status != 0:
             sys.exit(1)
 
