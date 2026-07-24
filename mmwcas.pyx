@@ -128,6 +128,23 @@ cdef extern from "ti/mmwave/mmwave.h":
         unsigned int dataPacking
         unsigned int numberOfFramesToCapture
 
+    # On-die temperature sensors (rl_sensor.h). All readings are signed degC,
+    # 1 LSB = 1 degC; `time` is radarSS time since power-up, 1 LSB = 1 ms.
+    ctypedef struct rlRfTempData_t:
+        uint32_t time
+        int16_t tmpRx0Sens
+        int16_t tmpRx1Sens
+        int16_t tmpRx2Sens
+        int16_t tmpRx3Sens
+        int16_t tmpTx0Sens
+        int16_t tmpTx1Sens
+        int16_t tmpTx2Sens
+        int16_t tmpPmSens
+        int16_t tmpDig0Sens
+        int16_t tmpDig1Sens
+
+    int rlRfGetTemperatureReport(uint8_t deviceMap, rlRfTempData_t* data)
+
     int MMWL_chirpConfig(unsigned char deviceMap, rlChirpCfg_t chirpCfgArgs)
     unsigned int createDevMapFromDevId(unsigned char devId)
     int MMWL_DevicePowerUp(unsigned char deviceMap, uint32_t rlClientCbsTimeout, uint32_t sopTimeout)
@@ -1067,6 +1084,51 @@ cpdef int mmw_stop_frame():
         config.deviceMap, 
         0)
     return status
+
+cpdef dict mmw_get_temperature():
+    """@brief Read the on-die temperature sensors of every active device.
+    *
+    * Frame losses on this rig appear partway into a capture and start EARLIER on
+    * each successive run (never / 19.3 s / 12.7 s across three back-to-back
+    * 300-frame captures), which is what a thermal limit looks like: each run
+    * begins hotter, so the threshold arrives sooner. This exposes the actual die
+    * temperatures so that can be confirmed rather than inferred - sample it
+    * before and after a capture and watch both the starting value and the rise.
+    *
+    * Reads RL_RF_TEMPERATURE via rlRfGetTemperatureReport() per device. Cheap
+    * and read-only, but it is still an RPC to the RF chip: call it AROUND a
+    * capture, not during framing, where the 98%-duty schedule leaves ~2 ms of
+    * idle per frame to service it.
+    *
+    * @return dict {dev_id: {"time_ms", "rx0".."rx3", "tx0".."tx2", "pm",
+    *         "dig0", "dig1", "max"}}, max being the hottest sensor on that
+    *         device. Devices that fail to answer are omitted, so a failed read
+    *         degrades to less data rather than an exception.
+    """
+    cdef rlRfTempData_t data
+    cdef int status
+    cdef int i
+    out = {}
+    for i in range(4):
+        if not (_device_map & (1 << i)):
+            continue
+        status = rlRfGetTemperatureReport(<uint8_t>(1 << i), &data)
+        if status != 0:
+            printf(b"[MMWCAS-RF] temperature read failed on device %d\n", i)
+            continue
+        sensors = {
+            "rx0": data.tmpRx0Sens, "rx1": data.tmpRx1Sens,
+            "rx2": data.tmpRx2Sens, "rx3": data.tmpRx3Sens,
+            "tx0": data.tmpTx0Sens, "tx1": data.tmpTx1Sens,
+            "tx2": data.tmpTx2Sens, "pm": data.tmpPmSens,
+            "dig0": data.tmpDig0Sens, "dig1": data.tmpDig1Sens,
+        }
+        sensors["time_ms"] = data.time
+        sensors["max"] = max(sensors[k] for k in
+                             ("rx0", "rx1", "rx2", "rx3", "tx0", "tx1", "tx2",
+                              "pm", "dig0"))
+        out[i] = sensors
+    return out
 
 cpdef int mmw_dearming_tda():
     cdef int status = 0

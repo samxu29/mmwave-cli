@@ -328,6 +328,33 @@ def _dev_id_from_data_bin(name):
     return None
 
 
+def _read_temps(label):
+    """Print on-die temperatures for every active device, return the reading.
+
+    Sampled around a capture (never during framing) to test the thermal
+    explanation for mid-capture frame loss: drops begin partway in and start
+    earlier on each successive run, consistent with each run beginning hotter.
+    Tolerates an mmwcas built before mmw_get_temperature() existed.
+    """
+    getter = getattr(mmwcas, "mmw_get_temperature", None)
+    if getter is None:
+        return None
+    try:
+        temps = getter()
+    except Exception as e:
+        print(f"    [TEMP] read failed ({e})")
+        return None
+    if not temps:
+        return None
+    for dev, s in sorted(temps.items()):
+        print(f"    [TEMP] {label:5s} dev{dev}: max {s['max']:3d}C  "
+              f"(rx {s['rx0']},{s['rx1']},{s['rx2']},{s['rx3']}  "
+              f"tx {s['tx0']},{s['tx1']},{s['tx2']}  "
+              f"pm {s['pm']}  dig {s['dig0']})  "
+              f"up {s['time_ms'] / 1000.0:.0f}s")
+    return temps
+
+
 def _arm_tda(capture_dir, num_frames, prealloc_files, packing):
     """Arm the TDA, tolerating an mmwcas built before data_packing existed.
 
@@ -679,6 +706,8 @@ def run_one_capture(exp_label, num_frames, tda_ip, prealloc_files=None,
     if ir_enabled:
         ir_recording = True
 
+    temps_before = _read_temps("pre")
+
     status = mmwcas.mmw_start_frame()
     if status != 0:
         ir_recording = False
@@ -694,6 +723,13 @@ def run_one_capture(exp_label, num_frames, tda_ip, prealloc_files=None,
     if status != 0:
         print(f"mmw_stop_frame failed (status: {status})")
         return status, capture_dir
+
+    temps_after = _read_temps("post")
+    if temps_before and temps_after:
+        for dev in sorted(set(temps_before) & set(temps_after)):
+            rise = temps_after[dev]["max"] - temps_before[dev]["max"]
+            print(f"    [TEMP] dev{dev} rose {rise:+d}C over this capture "
+                  f"({temps_before[dev]['max']}C -> {temps_after[dev]['max']}C)")
 
     status = mmwcas.mmw_dearming_tda()
     if status != 0:
