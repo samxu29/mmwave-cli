@@ -1,48 +1,53 @@
 import os
-import select
 import subprocess
 import sys
-import threading
 import time
 
 
 class TeeLogger:
     """Mirror everything the process prints into a log file, live.
 
-    Redirects at the FILE DESCRIPTOR level rather than by replacing sys.stdout,
-    because a large part of a capture's output - every "STATUS 0 | DEV MAP ..."
-    line, the chirp config dump, the TDA arm/framing messages - is printf() from
-    the compiled mmwcas extension and never passes through Python's stdout
-    object. Swapping sys.stdout would silently lose exactly the lines that say
-    whether the radar configured correctly.
+    Two design constraints, both learned the hard way:
 
-    The redirect target is a PTY, not a plain pipe. Behind a pipe the C library
-    switches from line buffering to 4 KB block buffering, so the terminal would
-    sit silent through most of a capture and then dump everything at exit; a pty
-    looks like a terminal to the C library, which keeps line buffering and the
-    live output unchanged. ONLCR is turned off on the slave so the log file gets
-    plain \\n rather than \\r\\n.
+    1. Redirect at the FILE DESCRIPTOR level, not by replacing sys.stdout. A
+       large part of a capture's output - every "STATUS 0 | DEV MAP ..." line,
+       the chirp config dump, the TDA arm/framing messages - is printf() from
+       the compiled mmwcas extension and never passes through Python's stdout
+       object, so a sys.stdout wrapper silently loses exactly the lines that say
+       whether the radar configured correctly.
 
-    A reader thread pumps the pty back to the real stdout and into the file,
-    flushing every chunk, so a capture killed with Ctrl+C still leaves a
-    complete log up to the moment it died.
+    2. Something OTHER THAN A PYTHON THREAD has to move the bytes. The first
+       version used a reader thread and killed live output completely: mmwcas's
+       cpdef entry points call into C without releasing the GIL, so during
+       mmw_set_config()/mmw_init() - tens of seconds, and where nearly all the
+       STATUS lines come from - no Python thread can run, and the terminal sat
+       silent until the call returned. Measured with a GIL-holding ctypes call:
+       a C line emitted at t+0.00 did not appear until t+3.00. It also risked a
+       hard deadlock, since a C write that fills the pty buffer while the GIL is
+       held can never be drained. An external `tee` process is immune: the
+       kernel and tee move the data with no reference to our interpreter.
+
+    So: fd 1/2 point at a pty slave, and `tee` runs with the pty master as its
+    stdin and the real terminal as its stdout. The pty (rather than a plain
+    pipe) matters because behind a pipe the C library switches from line to 4 KB
+    block buffering, which would batch the C output into bursts; a pty looks
+    like a terminal to it, so line buffering and live output are preserved.
+    ONLCR is cleared on the slave so the log gets plain \\n, not \\r\\n.
     """
 
     def __init__(self, path):
         self.path = path
-        self._fh = None
-        self._master = None
+        self._proc = None
         self._saved_out = None
         self._saved_err = None
-        self._thread = None
+        self._devnull = None
 
     def start(self):
         import pty
         import termios
 
         os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
-        self._fh = open(self.path, "wb")
-        self._master, slave = pty.openpty()
+        master, slave = pty.openpty()
         try:
             attrs = termios.tcgetattr(slave)
             attrs[1] &= ~termios.ONLCR          # oflag: no \n -> \r\n
@@ -55,6 +60,25 @@ class TeeLogger:
         sys.stderr.flush()
         self._saved_out = os.dup(1)
         self._saved_err = os.dup(2)
+
+        # tee's stderr goes to /dev/null on purpose: tearing the pty down at
+        # stop() makes its read() fail with EIO, and GNU tee reports that as
+        # "read error" on the terminal even though the log is complete.
+        self._devnull = os.open(os.devnull, os.O_WRONLY)
+        try:
+            self._proc = subprocess.Popen(
+                ["tee", self.path],
+                stdin=master, stdout=self._saved_out, stderr=self._devnull)
+        except (OSError, ValueError):
+            os.close(master)
+            os.close(slave)
+            os.close(self._devnull)
+            os.close(self._saved_out)
+            os.close(self._saved_err)
+            self._saved_out = self._saved_err = self._devnull = None
+            raise
+        os.close(master)                         # tee owns it now
+
         os.dup2(slave, 1)
         os.dup2(slave, 2)
         os.close(slave)
@@ -69,25 +93,7 @@ class TeeLogger:
                 stream.reconfigure(line_buffering=True)
             except (AttributeError, ValueError, OSError):
                 pass
-
-        self._thread = threading.Thread(target=self._pump, daemon=True)
-        self._thread.start()
         return self
-
-    def _pump(self):
-        while True:
-            try:
-                chunk = os.read(self._master, 4096)
-            except OSError:
-                break                            # EIO once the slave is gone
-            if not chunk:
-                break
-            try:
-                os.write(self._saved_out, chunk)
-                self._fh.write(chunk)
-                self._fh.flush()
-            except (OSError, ValueError):
-                break
 
     def rename(self, new_path):
         """Move the log to its final name mid-run.
@@ -95,9 +101,10 @@ class TeeLogger:
         The capture directory name (with its timestamp) only exists once the
         capture starts, but logging has to be running before that to catch the
         configuration output. So the log opens under a provisional name and is
-        renamed here; the write handle survives the rename, so nothing is lost.
+        renamed here; tee holds an open handle, so the rename follows the data
+        and nothing is lost.
         """
-        if not self._fh:
+        if self._proc is None:
             return self.path
         os.makedirs(os.path.dirname(new_path) or ".", exist_ok=True)
         try:
@@ -108,36 +115,31 @@ class TeeLogger:
         return self.path
 
     def stop(self):
-        """Restore the real stdout/stderr and close the log."""
+        """Restore the real stdout/stderr and let tee finish writing the log."""
         if self._saved_out is None:
             return self.path
         sys.stdout.flush()
         sys.stderr.flush()
 
-        # Drain before tearing the pty down. Restoring fd 1/2 drops the last
-        # descriptors on the slave, and a master read() after that returns EIO
-        # and discards anything still sitting in the pty buffer - which cost the
-        # final lines of the log (the completion banner) until this loop
-        # existed. Wait for the reader thread to see a few consecutive quiet
-        # polls, with a hard deadline so stop() can never hang a capture.
-        deadline = time.time() + 1.0
-        quiet = 0
-        while quiet < 3 and time.time() < deadline:
-            readable, _, _ = select.select([self._master], [], [], 0.02)
-            quiet = 0 if readable else quiet + 1
-
+        # Restoring fd 1/2 drops the last descriptors on the pty slave, which is
+        # what tells tee its input is finished. Waiting for tee to exit is what
+        # guarantees the log on disk is complete before anyone uploads it.
         os.dup2(self._saved_out, 1)
         os.dup2(self._saved_err, 2)
         os.close(self._saved_out)
         os.close(self._saved_err)
         self._saved_out = self._saved_err = None
-        if self._thread:
-            self._thread.join(timeout=2.0)
-        for closer in (lambda: os.close(self._master), self._fh.close):
+        try:
+            self._proc.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            self._proc.kill()
+            self._proc.wait(timeout=2.0)
+        if self._devnull is not None:
             try:
-                closer()
-            except (OSError, ValueError):
+                os.close(self._devnull)
+            except OSError:
                 pass
+            self._devnull = None
         return self.path
 
 
