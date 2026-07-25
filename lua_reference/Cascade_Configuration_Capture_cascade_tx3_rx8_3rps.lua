@@ -1,23 +1,24 @@
 --[[
-Cascade_Configuration_Capture_cascade_tx3_rx16_3rps.lua
+Cascade_Configuration_Capture_cascade_tx3_rx8_3rps.lua
 
-mmWave Studio capture matching radar_configs/cascade_tx3_rx16_3rps.toml.
+mmWave Studio capture matching radar_configs/cascade_tx3_rx8_3rps.toml.
 
-GEOMETRY (same as the TOML):
-  Dev1–3 : RX on, TX off
-  Dev4   : RX on, TX0/TX1/TX2 on chirps 0/1/2
-  -> deviceMapOverall = 15; master + slave1 + slave2 + slave3 .bin files
+GEOMETRY (same as cascade_tx3_rx8.toml):
+  Dev1 (master)  : RX on, TX off
+  Dev2 (slave1)  : DISABLED entirely (not powered / not captured)
+  Dev3 (slave2)  : DISABLED entirely
+  Dev4 (slave3)  : RX on, TX0/TX1/TX2 on chirps 0/1/2
+  -> deviceMapOverall = 1+8 = 9; only master_* and slave3_* .bin files
 
-RF (same as the TOML / CLI):
+RF (3rps spinning schedule):
   3 profiles, idle 5/5/5 us, ramp 40 us, slope 99.987 MHz/us
   160 samples @ 4850 ksps, rxGain 48, numLoops 255, period 37 ms
   (~27 Hz frame rate - "3rps" spinning-radar spacing)
 
   Active chirp time ≈ (5+40)*3 * 255 ≈ 34.4 ms per 37 ms frame (~93% duty).
 
-  WRITE RATE WARNING: 4 devices x 4 RX at this schedule needs ~212 MB/s, well
-  above the TDA SSD's measured ~92 MB/s. Expect heavy frame drops on long
-  captures unless you shorten length or drop devices/RX. Use parse_idx.py.
+  WRITE RATE: 2 devices x 4 RX ≈ 85 MB/s (near TDA SSD ~92 MB/s). Prefer this
+  over a full 16-RX 3rps schedule. Still verify with parse_idx.py.
 
 DEFAULT CAPTURE LENGTH: 300 frames (~11.1 s). Edit nframes_master/slave below.
 
@@ -32,25 +33,25 @@ BEFORE RUNNING - edit if needed:
 
 ----------------------------------------User Constants--------------------------------------------
 
-dev_list          =    {1, 2, 4, 8}
-RadarDevice       =    {1, 1, 1, 1}       -- all 4 devices - matches rxChannelEn = 0x0F
-cascade_mode_list =    {1, 2, 2, 2}
+dev_list          =    {1, 2, 4, 8}       -- Device map bit values
+-- Only Dev1 + Dev4 enabled - matches cascade_tx3_rx8_3rps.toml rxChannelEn=[0x0F,0,0,0x0F]
+RadarDevice       =    {1, 0, 0, 1}       -- {dev1, dev2, dev3, dev4}
+cascade_mode_list =    {1, 2, 2, 2}       -- 0: Single chip, 1: Master, 2: Slave
 
+-- F/W Download Path (edit for your Studio PC)
 metaImagePath            =   "C:\\ti\\mmwave_dfp_02_02_02_01\\firmware\\xwr22xx_metaImage.bin"
 -- metaImagePath            =   "C:\\ti\\mmwave_dfp_02_02_00_02\\firmware\\xwr22xx_metaImage.bin"
 
 TDA_IPAddress     =   "192.168.33.180"
 
-deviceMapOverall  =   RadarDevice[1] + (RadarDevice[2]*2) + (RadarDevice[3]*4) + (RadarDevice[4]*8)  -- 15
-deviceMapSlaves   =   (RadarDevice[2]*2) + (RadarDevice[3]*4) + (RadarDevice[4]*8)                 -- 14
-deviceMapMaster   =   RadarDevice[1]     -- 1
--- Chirp TX is Dev4-only; Dev2+Dev3 stay RX-only (do NOT ChirpConfig TX onto deviceMapSlaves)
-deviceMapSlaveRxOnly = 2 + 4             -- Dev2 + Dev3
-deviceMapDev4        = 8                 -- Dev4 / slave3
+-- 1=master, 2=slave1, 4=slave2, 8=slave3
+deviceMapOverall  =   RadarDevice[1] + (RadarDevice[2]*2) + (RadarDevice[3]*4) + (RadarDevice[4]*8)
+deviceMapSlaves   =   (RadarDevice[2]*2) + (RadarDevice[3]*4) + (RadarDevice[4]*8)  -- = 8 (Dev4 only)
+deviceMapMaster   =   RadarDevice[1]     -- = 1
 
 WriteToLog(string.format(
-    "deviceMapOverall=%d (expect 15), slaves=%d, master=%d, Dev4=%d\n",
-    deviceMapOverall, deviceMapSlaves, deviceMapMaster, deviceMapDev4), "blue")
+    "deviceMapOverall=%d (expect 9), deviceMapSlaves=%d (expect 8), deviceMapMaster=%d\n",
+    deviceMapOverall, deviceMapSlaves, deviceMapMaster), "blue")
 
 ------------------------------------------- Sensor Configuration ------------------------------------------------
 
@@ -76,7 +77,7 @@ local trigger_delay             =   0        -- us
 
 ------------------------------ API Configuration ------------------------------------------------
 
-WriteToLog("Setting up Studio for Cascade (cascade_tx3_rx16_3rps)...\n", "blue")
+WriteToLog("Setting up Studio for Cascade (cascade_tx3_rx8_3rps)...\n", "blue")
 
 if(0 == ar1.ConnectTDA(TDA_IPAddress, 5001, deviceMapOverall)) then
     WriteToLog("ConnectTDA Successful\n", "green")
@@ -124,6 +125,8 @@ else
     return -1
 end
 
+-- Master: all 4 RX, all 3 TX channels enabled at channel level (TX gates are
+-- per-chirp below), cascade mode = 1 (master)
 if (0 == ar1.ChanNAdcConfig_mult(1,1,1,1,1,1,1,1,2,1,0,1)) then
     WriteToLog("Master : Channel & ADC Configuration Successful\n", "green")
 else
@@ -131,7 +134,7 @@ else
     return -2
 end
 
--- Slaves Initialization (Dev2, Dev3, Dev4)
+-- Slaves Initialization (only Dev4 with RadarDevice={1,0,0,1})
 
 for i=2,table.getn(RadarDevice) do
     if ((RadarDevice[1]==1) and (RadarDevice[i]==1)) then
@@ -167,6 +170,7 @@ else
     return -1
 end
 
+-- Slave(s): cascade mode = 2
 if (0 == ar1.ChanNAdcConfig_mult(deviceMapSlaves,1,1,1,1,1,1,1,2,1,0,2)) then
     WriteToLog("Slaves : Channel & ADC Configuration Successful\n", "green")
 else
@@ -174,7 +178,7 @@ else
     return -2
 end
 
--- All devices together
+-- All active devices together
 
 if (0 == ar1.RfLdoBypassConfig_mult(deviceMapOverall, 3)) then
     WriteToLog("LDO Bypass Successful\n", "green")
@@ -260,9 +264,9 @@ else
     return -4
 end
 
--- Chirp geometry matches cascade_tx3_rx16_3rps.toml txAntennaTable:
---   Dev1 / Dev2 / Dev3 : TX off
---   Dev4               : TX0 / TX1 / TX2 on chirp 0 / 1 / 2
+-- Chirp geometry matches cascade_tx3_rx8_3rps.toml txAntennaTable:
+--   Dev1 master : all TX off on every chirp (RX only)
+--   Dev4 slave3 : TX0 / TX1 / TX2 on chirp 0 / 1 / 2
 
 -- Chirp 0 / Profile 0
 if (0 == ar1.ChirpConfig_mult(deviceMapMaster, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)) then
@@ -271,13 +275,7 @@ else
     WriteToLog("Chirp 0 (Dev1, TX off) Configuration failed\n", "red")
     return -4
 end
-if (0 == ar1.ChirpConfig_mult(deviceMapSlaveRxOnly, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)) then
-    WriteToLog("Chirp 0 (Dev2+Dev3, TX off) Configuration successful\n", "green")
-else
-    WriteToLog("Chirp 0 (Dev2+Dev3, TX off) Configuration failed\n", "red")
-    return -4
-end
-if (0 == ar1.ChirpConfig_mult(deviceMapDev4, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0)) then
+if (0 == ar1.ChirpConfig_mult(deviceMapSlaves, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0)) then
     WriteToLog("Chirp 0 (Dev4 TX0) Configuration successful\n", "green")
 else
     WriteToLog("Chirp 0 (Dev4 TX0) Configuration failed\n", "red")
@@ -291,13 +289,7 @@ else
     WriteToLog("Chirp 1 (Dev1, TX off) Configuration failed\n", "red")
     return -4
 end
-if (0 == ar1.ChirpConfig_mult(deviceMapSlaveRxOnly, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0)) then
-    WriteToLog("Chirp 1 (Dev2+Dev3, TX off) Configuration successful\n", "green")
-else
-    WriteToLog("Chirp 1 (Dev2+Dev3, TX off) Configuration failed\n", "red")
-    return -4
-end
-if (0 == ar1.ChirpConfig_mult(deviceMapDev4, 1, 1, 1, 0, 0, 0, 0, 0, 1, 0)) then
+if (0 == ar1.ChirpConfig_mult(deviceMapSlaves, 1, 1, 1, 0, 0, 0, 0, 0, 1, 0)) then
     WriteToLog("Chirp 1 (Dev4 TX1) Configuration successful\n", "green")
 else
     WriteToLog("Chirp 1 (Dev4 TX1) Configuration failed\n", "red")
@@ -311,13 +303,7 @@ else
     WriteToLog("Chirp 2 (Dev1, TX off) Configuration failed\n", "red")
     return -4
 end
-if (0 == ar1.ChirpConfig_mult(deviceMapSlaveRxOnly, 2, 2, 2, 0, 0, 0, 0, 0, 0, 0)) then
-    WriteToLog("Chirp 2 (Dev2+Dev3, TX off) Configuration successful\n", "green")
-else
-    WriteToLog("Chirp 2 (Dev2+Dev3, TX off) Configuration failed\n", "red")
-    return -4
-end
-if (0 == ar1.ChirpConfig_mult(deviceMapDev4, 2, 2, 2, 0, 0, 0, 0, 0, 0, 1)) then
+if (0 == ar1.ChirpConfig_mult(deviceMapSlaves, 2, 2, 2, 0, 0, 0, 0, 0, 0, 1)) then
     WriteToLog("Chirp 2 (Dev4 TX2) Configuration successful\n", "green")
 else
     WriteToLog("Chirp 2 (Dev4 TX2) Configuration failed\n", "red")
@@ -340,12 +326,16 @@ else
 end
 
 ---------------------------Capture Configuration-------------------------
+-- Match current CLI arming where it matters for the drop A/B:
+--   n_files_allocation = 1  (CLI pre-allocates; Studio used to leave this 0)
+--   data_packaging     = 0  (16-bit)
+--   num_frames_to_capture = 0  (TDA follows FrameConfig's 300)
 
 local timestamp           =   os.date("%Y%m%d_%H%M%S")
-capture_directory         =   "studio_tx3_rx16_3rps_" .. timestamp
-n_files_allocation        =   1      -- match CLI pre-alloc; set 0 for old Studio default
+capture_directory         =   "studio_tx3_rx8_3rps_" .. timestamp
+n_files_allocation        =   1      -- match CLI pre-alloc; set 0 to match old Studio default
 data_packaging            =   0      -- 0: 16-bit, 1: 12-bit
-num_frames_to_capture     =   0      -- 0: TDA follows FrameConfig frame count
+num_frames_to_capture     =   0      -- 0: TDA follows FrameConfig frame count (300)
 stop_frame_mode           =   0
 
 WriteToLog("Recording basename set to: " .. capture_directory .. "\n", "blue")
@@ -363,6 +353,7 @@ end
 
 RSTD.Sleep(1000)
 
+-- Slaves first (wait for HW sync), then master (software trigger + sync pulse)
 if (0 == ar1.StartFrame_mult(deviceMapSlaves)) then
     WriteToLog("Slaves : Start Frame (armed, waiting for HW sync) Successful\n", "green")
 else
@@ -388,4 +379,4 @@ WriteToLog("Capture complete. Directory on TDA: /mnt/ssd/" .. capture_directory 
 WriteToLog("On the Pi, count frames with:\n", "blue")
 WriteToLog("  python3 parse_idx.py --fetch " .. capture_directory
     .. " --frames " .. nframes_master .. " --period-ms " .. Inter_Frame_Interval .. "\n", "blue")
-WriteToLog("Expect master + slave1 + slave2 + slave3 *_0000_*.bin files.\n", "blue")
+WriteToLog("Expect only master_0000_*.bin and slave3_0000_*.bin (no slave1/slave2).\n", "blue")

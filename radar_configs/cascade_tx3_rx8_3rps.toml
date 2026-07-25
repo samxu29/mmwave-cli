@@ -1,16 +1,17 @@
-# radar_configs/cascade_tx3_rx16_3rps.toml
-# 3-chirp / Dev4-TX / 16-RX preset tuned for ~3 rev/s spinning capture
-# (--radar-config cascade_tx3_rx16_3rps).
+# radar_configs/cascade_tx3_rx8_3rps.toml
+# 3-chirp / Dev4-TX / 8-RX (Dev1+Dev4) preset tuned for ~3 rev/s spinning
+# capture (--radar-config cascade_tx3_rx8_3rps).
 #
-# Same geometry as cascade_tx3_rx16.toml (Dev4 TX0/TX1/TX2 on chirp0/1/2;
-# Dev1–3 RX-only), but denser frame timing: period 37 ms (~27 Hz), short
-# idle 5/5/5 us, ramp 40 us, slope ~100 MHz/us, 160 samples @ 4850 ksps.
+# Same geometry as cascade_tx3_rx8.toml (only Dev1 master + Dev4 slave3 active;
+# Dev2/Dev3 dropped; Dev4 TX0/TX1/TX2 on chirp0/1/2), but denser frame timing:
+# period 37 ms (~27 Hz), short idle 5/5/5 us, ramp 40 us, slope ~100 MHz/us,
+# 160 samples @ 4850 ksps.
 #
-# NOTE: 4 devices x 4 RX at this rate needs ~212 MB/s write bandwidth — well
-# above the TDA SSD's measured ~92 MB/s. Expect frame drops on long captures
-# unless length/RX/devices are reduced.
+# DATA RATE: 160 x 3 x 255 x 4 RX x 4 bytes x 2 dev / 0.037 s ~= 85 MB/s —
+# near the TDA SSD's measured ~92 MB/s. Prefer this over the full 16-RX 3rps
+# schedule (~212 MB/s) for long spinning captures; still use parse_idx.py.
 #
-# Studio twin: lua_reference/Cascade_Configuration_Capture_cascade_tx3_rx16_3rps.lua
+# Studio twin: lua_reference/Cascade_Configuration_Capture_cascade_tx3_rx8_3rps.lua
 # Copy this file to add a new preset; select with --radar-config <name>.
 
 [mimo.profile]
@@ -35,7 +36,7 @@ txPhaseShifter = 0x00
 [mimo.frame]
 numLoops = 255                  # mimo.c PATCHED value (was 16)
 numFrames = 0                   # Overridden by mimo.py --frames (0 in TOML = unused)
-framePeriodicity = 37          # ms - mimo.c PATCHED value (was 50; 10Hz frame rate)
+framePeriodicity = 37          # ms - ~27 Hz for ~3 rev/s spinning capture
 chirpStartIdx = 0
 chirpEndIdx = 2                 # 3 chirps (0-2)
 frameTriggerDelay = 0.0
@@ -43,19 +44,23 @@ triggerSelectMaster = 1         # software trigger
 triggerSelectSlave = 2          # hardware sync from master
 
 [mimo.channel]
-rxChannelEn = 0x0F              # Enable all 4 RX channels
+# Per-device RX mask [Dev1, Dev2, Dev3, Dev4]. 0 = drop that device entirely
+# (no .bin written). Dev1+Dev4 with all 4 RX -> 8 physical RX.
+rxChannelEn = [0x0F, 0x00, 0x00, 0x0F]
 txChannelEn = 0x07              # Enable all 3 TX channels
 
 # Chirp geometry: per-device local TX antenna index per chirp (-1 = TX off).
 # Matches mmwcas/mimo.c chripTxTable - only Dev4 (index 3) transmits.
+# Dev2/Dev3 rows are RX-only placeholders; those devices are dropped anyway
+# (rxChannelEn=0), so their rows must stay all -1 (no TX on a dropped device).
 [mimo.chirp]
 numChirps = 3
 profileIdPerChirp = [0, 1, 2]
 txAntennaTable = [
-    [-1, -1, -1],                # Dev1 master: RX only
-    [-1, -1, -1],                # Dev2 slave1: RX only
-    [-1, -1, -1],                # Dev3 slave2: RX only
-    [0, 1, 2],                   # Dev4 slave3: TX0/TX1/TX2 on chirp0/1/2
+    [-1, -1, -1],                # Dev1 master: RX only (4 RX active)
+    [-1, -1, -1],                # Dev2 slave1: DROPPED (rxChannelEn=0)
+    [-1, -1, -1],                # Dev3 slave2: DROPPED (rxChannelEn=0)
+    [0, 1, 2],                   # Dev4 slave3: TX0/TX1/TX2 on chirp0/1/2 (4 RX active)
 ]
 startFreqVar_MHz = 0.0
 freqSlopeVar_KHz_usec = 0.0
