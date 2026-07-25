@@ -336,14 +336,16 @@ def sync_tda_clock(tda_ip="192.168.33.180", timeout=15):
     FOR DOWNSTREAM" in mimo.py's docstring.
 
     The TDA's `date` is BusyBox, not GNU coreutils - confirmed by `%N`
-    (nanoseconds) coming back as a literal "%N" instead of being expanded,
-    which broke an earlier version of this function. Both commands here are
-    deliberately restricted to syntax BusyBox has always supported (whole-
-    second `%s` for the read; the traditional POSIX `MMDDhhmm[CC]YY.ss` form
-    for the set, rather than gambling on GNU's `-s @epoch` shorthand being
-    compiled in). That caps precision at whole seconds plus one SSH round
-    trip (roughly 1-2s), not sub-second - good enough to tell which capture
-    session an IR event belongs to, not which exact frame within it.
+    (nanoseconds) coming back as a literal "%N" instead of being expanded.
+    Which `-s TIME` syntax this particular build accepts is not something we
+    can know in advance (a first guess of the classic POSIX
+    "MMDDhhmm[CC]YY.ss" form was rejected as "invalid date" on real
+    hardware), so the set step tries a short list of the most common
+    `date -s` forms in order and uses whichever one the target accepts,
+    rather than betting the whole feature on one guess. Read stays on plain
+    `%s` (no `%N`) either way. That caps precision at whole seconds plus one
+    SSH round trip (roughly 1-2s), not sub-second - good enough to tell
+    which capture session an IR event belongs to, not which exact frame.
 
     Never raises - a failed sync is a printed warning, not a fatal error,
     since a capture with unsynced clocks is still otherwise usable.
@@ -368,19 +370,32 @@ def sync_tda_clock(tda_ip="192.168.33.180", timeout=15):
         tda_before = float(res.stdout.strip())
         offset = tda_before - (t0 + t1) / 2.0
 
-        # BusyBox's traditional `date -s` argument format: MMDDhhmm[CC]YY.ss
-        # (no separators). Universally supported, unlike ISO strings or the
-        # GNU `@epoch` shorthand, which depend on optional BusyBox features.
-        posix_ts = time.strftime("%m%d%H%M%Y.%S", time.gmtime())
-        res2 = subprocess.run(ssh_base + [f"date -u -s {posix_ts} >/dev/null"],
-                              capture_output=True, text=True, timeout=timeout)
-        if res2.returncode != 0:
-            print(f"    [CLOCK] TDA clock was {offset:+.1f}s vs host, but the "
-                  f"set command failed ({res2.stderr.strip()}) - IR/frame "
-                  f"timestamps may be misaligned by that much.")
-            return offset
+        host_epoch = int(round(time.time()))
+        gm = time.gmtime(host_epoch)
+        # Try, in order: GNU/newer-BusyBox epoch shorthand; ISO 8601 (BusyBox
+        # FEATURE_DATE_ISOFMT, also GNU); classic POSIX positional with a
+        # 2-digit year (the oldest, most minimal form); same without a
+        # seconds field, in case ".ss" itself is what a given build rejects.
+        set_candidates = [
+            f"@{host_epoch}",
+            time.strftime("%Y-%m-%d %H:%M:%S", gm),
+            time.strftime("%m%d%H%M%y.%S", gm),
+            time.strftime("%m%d%H%M%y", gm),
+        ]
+        last_err = ""
+        for candidate in set_candidates:
+            res2 = subprocess.run(ssh_base + [f"date -u -s '{candidate}' >/dev/null"],
+                                  capture_output=True, text=True, timeout=timeout)
+            if res2.returncode == 0:
+                print(f"    [CLOCK] TDA clock was {offset:+.1f}s vs host - "
+                      f"resynced to host time (date -s '{candidate}').")
+                return offset
+            last_err = res2.stderr.strip()
 
-        print(f"    [CLOCK] TDA clock was {offset:+.1f}s vs host - resynced to host time.")
+        print(f"    [CLOCK] TDA clock was {offset:+.1f}s vs host, but no "
+              f"supported `date -s` syntax was found (last error: "
+              f"{last_err}) - IR/frame timestamps may be misaligned by "
+              f"that much.")
         return offset
     except subprocess.TimeoutExpired:
         print(f"    [CLOCK] WARNING: SSH timeout syncing TDA clock - IR/frame "
