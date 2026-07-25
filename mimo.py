@@ -755,15 +755,17 @@ def run_one_capture(exp_label, num_frames, tda_ip, prealloc_files=None,
         return status, capture_dir
     time.sleep(2)
 
+    temps_before = _read_temps("pre")
+
     # IR recording is only ever "on" for the TDA framing window below - armed
-    # right before mmw_start_frame(), disarmed when the frame wait ends
-    # (before mmw_stop_frame()/de-arm/transfer, which are unrelated to
-    # framing and shouldn't pick up stray edges).
+    # right before mmw_start_frame() (not earlier, e.g. before the _read_temps
+    # RPC above, whose variable latency would otherwise let in a random,
+    # unsynchronized edge or two ahead of frame 0), disarmed when the frame
+    # wait ends (before mmw_stop_frame()/de-arm/transfer, which are unrelated
+    # to framing and shouldn't pick up stray edges).
     global ir_recording
     if ir_enabled:
         ir_recording = True
-
-    temps_before = _read_temps("pre")
 
     status = mmwcas.mmw_start_frame()
     if status != 0:
