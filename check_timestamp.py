@@ -278,6 +278,15 @@ def cross_check_duration(ir_ts, frame_ts, frame_label="frame"):
     """Compare the IR marker span against a frame timestamp array's span -
     no clock-alignment assumption needed, just two durations that are
     supposed to roughly agree (see module docstring)."""
+    if len(ir_ts) == 0 or len(frame_ts) == 0:
+        print(f"\n{'-'*66}")
+        print(f"Duration cross-check (IR marker span vs {frame_label} span)")
+        print(f"{'-'*66}")
+        print(f"  (need at least one IR marker and one frame timestamp - got "
+              f"{len(ir_ts)} marker(s), {len(frame_ts)} frame(s) - skipping. "
+              f"Zero IR markers usually means the rig wasn't spinning, or "
+              f"--ir-bounce-ms/--ir-pin need checking.)")
+        return
     ir_span_s = float(max(ir_ts) - min(ir_ts))
     frame_span_s = float(max(frame_ts) - min(frame_ts))
     print(f"\n{'-'*66}")
@@ -315,6 +324,11 @@ def cross_check_nearest(ir_ts, ref_ts, show_n=40, exact=False):
     APPROXIMATION that assumes the first IR marker and first frame happened
     at about the same real moment (see module docstring).
     """
+    if len(ir_ts) == 0 or len(ref_ts) == 0:
+        print(f"\n(need at least one IR marker and one frame timestamp for the "
+              f"nearest-time comparison - got {len(ir_ts)} marker(s), "
+              f"{len(ref_ts)} frame(s) - skipping.)")
+        return
     ir = np.array(sorted(float(t) for t in ir_ts))
     ref = np.array(sorted(float(t) for t in ref_ts))
     if not exact:
