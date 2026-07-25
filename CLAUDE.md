@@ -82,11 +82,16 @@ python3 -c "import mmwcas; print('mmwcas OK')"
 - `run_one_capture()` always resyncs the TDA's system clock to the host's over
   SSH before arming (`utility.sync_tda_clock()`) — the TDA is on an isolated
   subnet with no real time source, so its RTC free-runs from an arbitrary
-  boot value while the IR timestamps above use the host's `time.time()`.
-  Without this the two are on unrelated time bases and can't be correlated.
-  Not sub-millisecond precision (SSH connection setup dominates the error
-  budget), but good enough to place an IR event within the right frame or
-  two. No opt-out — every capture path (`mimo.py`, `mimo_interactive.py`)
+  boot value (observed years off) while the IR timestamps above use the
+  host's `time.time()`. Without this the two are on unrelated time bases and
+  can't be correlated. The TDA's `date` is BusyBox (confirmed: `%N` comes
+  back literal, not expanded), so both the read and the set are restricted
+  to syntax BusyBox has always supported — whole-second `%s`, and the
+  traditional POSIX `MMDDhhmm[CC]YY.ss` set form rather than GNU's `-s
+  @epoch`. That caps precision at roughly 1-2s (whole seconds + one SSH
+  round trip), not sub-second — enough to place an IR event in the right
+  capture session, not the exact frame. No opt-out — every capture path
+  (`mimo.py`, `mimo_interactive.py`)
   goes through `run_one_capture()`, so this always runs.
 
 ---

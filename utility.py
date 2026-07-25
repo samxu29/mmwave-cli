@@ -328,18 +328,22 @@ def sync_tda_clock(tda_ip="192.168.33.180", timeout=15):
     minus host time, in seconds; None if the read/set failed).
 
     The TDA sits on an isolated subnet with no route to a real time source,
-    so its RTC free-runs from an arbitrary boot value while mimo.py's IR
-    sensor timestamps use this host's time.time(). Without this, the
-    per-frame timestamps written into <dev>_0000_idx.bin (TDA clock) and the
-    IR marker timestamps (host clock) are on unrelated time bases and can't
-    be correlated - see "CONSEQUENCE FOR DOWNSTREAM" in mimo.py's docstring.
+    so its RTC free-runs from an arbitrary boot value (observed years off,
+    not just seconds) while mimo.py's IR sensor timestamps use this host's
+    time.time(). Without this, the per-frame timestamps written into
+    <dev>_0000_idx.bin (TDA clock) and the IR marker timestamps (host clock)
+    are on unrelated time bases and can't be correlated - see "CONSEQUENCE
+    FOR DOWNSTREAM" in mimo.py's docstring.
 
-    Brackets the remote `date` read with local timestamps and uses the
-    midpoint as the network-latency estimate - the same trick a basic NTP
-    client uses - before pushing the correction back. SSH connection setup
-    (not that estimate) dominates the error budget, so this gets the two
-    clocks within roughly one SSH round trip of each other: good enough to
-    place an IR event within the right frame or two, not sub-millisecond.
+    The TDA's `date` is BusyBox, not GNU coreutils - confirmed by `%N`
+    (nanoseconds) coming back as a literal "%N" instead of being expanded,
+    which broke an earlier version of this function. Both commands here are
+    deliberately restricted to syntax BusyBox has always supported (whole-
+    second `%s` for the read; the traditional POSIX `MMDDhhmm[CC]YY.ss` form
+    for the set, rather than gambling on GNU's `-s @epoch` shorthand being
+    compiled in). That caps precision at whole seconds plus one SSH round
+    trip (roughly 1-2s), not sub-second - good enough to tell which capture
+    session an IR event belongs to, not which exact frame within it.
 
     Never raises - a failed sync is a printed warning, not a fatal error,
     since a capture with unsynced clocks is still otherwise usable.
@@ -354,7 +358,7 @@ def sync_tda_clock(tda_ip="192.168.33.180", timeout=15):
     ]
     try:
         t0 = time.time()
-        res = subprocess.run(ssh_base + ["date +%s.%N"], capture_output=True,
+        res = subprocess.run(ssh_base + ["date +%s"], capture_output=True,
                              text=True, timeout=timeout)
         t1 = time.time()
         if res.returncode != 0:
@@ -364,16 +368,19 @@ def sync_tda_clock(tda_ip="192.168.33.180", timeout=15):
         tda_before = float(res.stdout.strip())
         offset = tda_before - (t0 + t1) / 2.0
 
-        host_now = time.time()
-        res2 = subprocess.run(ssh_base + [f"date -u -s @{host_now:.6f} >/dev/null"],
+        # BusyBox's traditional `date -s` argument format: MMDDhhmm[CC]YY.ss
+        # (no separators). Universally supported, unlike ISO strings or the
+        # GNU `@epoch` shorthand, which depend on optional BusyBox features.
+        posix_ts = time.strftime("%m%d%H%M%Y.%S", time.gmtime())
+        res2 = subprocess.run(ssh_base + [f"date -u -s {posix_ts} >/dev/null"],
                               capture_output=True, text=True, timeout=timeout)
         if res2.returncode != 0:
-            print(f"    [CLOCK] TDA clock was {offset:+.3f}s vs host, but the "
+            print(f"    [CLOCK] TDA clock was {offset:+.1f}s vs host, but the "
                   f"set command failed ({res2.stderr.strip()}) - IR/frame "
                   f"timestamps may be misaligned by that much.")
             return offset
 
-        print(f"    [CLOCK] TDA clock was {offset:+.3f}s vs host - resynced to host time.")
+        print(f"    [CLOCK] TDA clock was {offset:+.1f}s vs host - resynced to host time.")
         return offset
     except subprocess.TimeoutExpired:
         print(f"    [CLOCK] WARNING: SSH timeout syncing TDA clock - IR/frame "
