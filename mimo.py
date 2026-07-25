@@ -40,14 +40,19 @@ probe_run_260724_211910, 567/600 frames, 28 internal gaps):
   * RF frame overrun / duty cycle, SSD capacity, temperature, host wait,
     session drift - see earlier experiments.
 
-PRIME SUSPECT now is inside the TDA capture path ABOVE the filesystem - CSI2
-receive / DMA / the capture application itself dropping a frame before it is
-written. That is consistent with: zero page-cache activity, steady SSD write
-rate through gap seconds, shared master+slave indices, and independence from
-MB/s. We cannot see that path from this repo (TDA firmware is closed); the
-remaining levers are comparing against mmWave Studio at the SAME frame count,
-and asking whether Studio's capture app differs from the Ethernet-armed path
-we use.
+PRIME SUSPECT now is our CLI / Ethernet arming path, NOT the TDA hardware or
+the RF config. Studio A/B at the same cascade_tx3_rx8 geometry and 600 frames
+(lua_reference/Cascade_Configuration_Capture_cascade_tx3_rx8_600.lua,
+studio_tx3_rx8_600_20260724_212505):
+  * Studio: 599/600, ZERO internal gaps, perfect 100.01 ms median grid, only a
+    clean 1-frame tail shortfall (= mechanism A).
+  * CLI:    routinely 5-33 internal mid-capture gaps on the same length.
+So the RF schedule, SSD, and TDA capture firmware can deliver a clean 60 s
+capture when Studio drives them. Mechanism (B) is introduced by how we
+configure/arm/stop from mmwcas on the Pi. Remaining bisect targets: TDA
+numberOfFramesToCapture (Studio passes 0 = follow FrameConfig; we pass N+50),
+post-arm settle, CreateApp / ConnectTDA sequencing, RfInitCalibConfig, and
+stop/de-arm behaviour.
 
 WHAT HELPED, MODESTLY: arming with numberOfFilesToAllocate > 0 so the TDA is not
 extending the capture file while frames stream in. Pooled means over identical
@@ -586,11 +591,13 @@ def _warn_on_frame_drops(files, num_frames, cfg):
         print(f"       the rest   internal single-frame gaps, ~1-2%, same "
               f"indices on every")
         print(f"                  device, cause still unknown.")
-        print(f"     Ruled out: page cache/writeback (Dirty=Writeback=0 during "
-              f"capture), write")
-        print(f"     rate, SSD saturation, RF duty, temperature, host wait. "
-              f"Suspect is above")
-        print(f"     the filesystem (CSI2/DMA/TDA capture app).")
+        print(f"     Ruled out: page cache/writeback, write rate, SSD saturation, "
+              f"RF duty,")
+        print(f"     temperature, host wait. Studio at the same 600-frame "
+              f"config is clean")
+        print(f"     (599/600, zero internal gaps) - so this is a CLI/Ethernet "
+              f"arming-path bug,")
+        print(f"     not the TDA hardware or the RF schedule.")
         print(f"     Inspect with:  python3 parse_idx.py --fetch <capture_dir>")
         print(f"     IMPORTANT: _idx.bin carries a timestamp per frame. "
               f"Downstream must place")
