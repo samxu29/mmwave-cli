@@ -79,10 +79,10 @@ The radar + TDA are programmed with that numFrames so they stop after exactly
 N frames (e.g. 300 frames @ 100 ms period ≈ 30 s). Host sleep is only
 N × framePeriodicity + a small margin so we do not stop_frame early.
 
-Single capture per process invocation, then exit (used by pipeline.py). For
-repeats, re-invoke this script (fresh mmw_init() each time) from pipeline.py,
-a shell loop, or cron - do not add a capture loop back into this file (see
-the "Single capture, then exit" comment in main() for why).
+Single capture per process invocation, then exit. For repeats, re-invoke
+this script (fresh mmw_init() each time) from a shell loop or cron - do not
+add a capture loop back into this file (see the "Single capture, then exit"
+comment in main() for why).
 
 The old --interactive REPL mode (configure once, loop on typed experiment
 names) has moved to mimo_interactive.py and is DEPRECATED - see that file's
@@ -101,9 +101,9 @@ or if --no-ir is passed.
 
 After a successful capture, the local IR timestamps .npy and the .mmwave.json
 config file are both SCP'd up into /mnt/ssd/<capture_dir>/ on the TDA board
-itself (alongside the raw .bin data), so pipeline.py's existing
-SCP-download-then-delete step picks them up together with the capture
-automatically - no separate correlation step needed downstream.
+itself (alongside the raw .bin data), so they travel with the capture as a
+single unit for whatever downstream transfer step (e.g. fetch_to_usb.sh)
+pulls the data off the TDA - no separate correlation step needed.
 """
 import time
 import argparse
@@ -119,6 +119,7 @@ from utility import signal_handler
 from utility import upload_files_to_tda
 from utility import truncate_capture_padding
 from utility import read_tda_thermal
+from utility import sync_tda_clock
 from utility import TeeLogger
 from radar_config import RADAR_CONFIGS, DEFAULT_RADAR_CONFIG, get_radar_config
 import os
@@ -702,6 +703,11 @@ def run_one_capture(exp_label, num_frames, tda_ip, prealloc_files=None,
     exactly that, though repeated same-process captures are the case known
     to show SSD/network throughput drift (see mimo.py's module docstring).
 
+    Always resyncs the TDA's system clock to this host's over SSH before
+    arming (see utility.sync_tda_clock()) - the TDA has no real time source
+    of its own, so without this its per-frame timestamps and the host's IR
+    sensor timestamps drift apart and can't be correlated.
+
     Capture length is num_frames: the host waits
     num_frames × framePeriodicity + one period margin before calling
     mmw_stop_frame(). This is wall-clock-based, not hardware-exact - actual
@@ -734,6 +740,8 @@ def run_one_capture(exp_label, num_frames, tda_ip, prealloc_files=None,
 
     print(f"\n>>> Capturing '{capture_dir}' — {num_frames} frames "
           f"(~{approx_s:.1f}s @ {period_s*1000:.0f} ms/frame) ...")
+
+    sync_tda_clock(tda_ip)
 
     tda_temps_before = _read_tda_temps("pre", tda_ip)
 
@@ -820,7 +828,7 @@ def run_one_capture(exp_label, num_frames, tda_ip, prealloc_files=None,
     _warn_on_frame_drops(files, num_frames, config_dict)
 
     # Give back the pre-allocation padding (each reserved file is a fixed
-    # 2047 MB) so pipeline.py only transfers real frames.
+    # 2047 MB) so downstream transfer only moves real frames.
     if reclaim_padding:
         truncate_capture_padding(_payload_sizes(files, config_dict),
                                  capture_dir, tda_ip)
@@ -831,9 +839,10 @@ def run_one_capture(exp_label, num_frames, tda_ip, prealloc_files=None,
     export_config_to_json(config_dict, json_filename)
 
     # Push the IR timestamps + config sidecar up into the same TDA capture
-    # directory as the raw .bin data, so they travel together through the
-    # existing SCP-transfer-then-delete pipeline (pipeline.py) instead of
-    # needing separate correlation after the fact.
+    # directory as the raw .bin data, so they travel together through
+    # whatever downstream transfer step (e.g. fetch_to_usb.sh) pulls the
+    # capture off the TDA, instead of needing separate correlation after
+    # the fact.
     upload_files_to_tda([ir_npy_path, json_filename], capture_dir, tda_ip)
 
     return status, capture_dir
@@ -1019,7 +1028,7 @@ def main():
     # an SSD/network throughput ceiling on the TDA (frame drops), not
     # something fixable from the host side. Run mimo.py again (fresh process,
     # fresh mmw_init()) for each capture, or drive repeats externally (a
-    # shell loop, cron, or pipeline.py) so you control the spacing.
+    # shell loop or cron) so you control the spacing.
     print("\n" + "="*60)
     print(f"Recording frames: {args.frames}  (~{args.frames * period_s:.1f}s)")
     print("="*60)

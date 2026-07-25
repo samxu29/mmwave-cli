@@ -321,6 +321,69 @@ def read_tda_thermal(tda_ip="192.168.33.180", timeout=15):
         return {}
 
 
+def sync_tda_clock(tda_ip="192.168.33.180", timeout=15):
+    """
+    Set the TDA board's system clock to match this host's wall clock over
+    SSH. Returns the offset that was measured before the sync (TDA time
+    minus host time, in seconds; None if the read/set failed).
+
+    The TDA sits on an isolated subnet with no route to a real time source,
+    so its RTC free-runs from an arbitrary boot value while mimo.py's IR
+    sensor timestamps use this host's time.time(). Without this, the
+    per-frame timestamps written into <dev>_0000_idx.bin (TDA clock) and the
+    IR marker timestamps (host clock) are on unrelated time bases and can't
+    be correlated - see "CONSEQUENCE FOR DOWNSTREAM" in mimo.py's docstring.
+
+    Brackets the remote `date` read with local timestamps and uses the
+    midpoint as the network-latency estimate - the same trick a basic NTP
+    client uses - before pushing the correction back. SSH connection setup
+    (not that estimate) dominates the error budget, so this gets the two
+    clocks within roughly one SSH round trip of each other: good enough to
+    place an IR event within the right frame or two, not sub-millisecond.
+
+    Never raises - a failed sync is a printed warning, not a fatal error,
+    since a capture with unsynced clocks is still otherwise usable.
+    """
+    ssh_base = [
+        "ssh",
+        "-oHostKeyAlgorithms=+ssh-rsa",
+        "-oPubkeyAcceptedAlgorithms=+ssh-rsa",
+        "-oStrictHostKeyChecking=no",
+        "-oConnectTimeout=10",
+        f"root@{tda_ip}",
+    ]
+    try:
+        t0 = time.time()
+        res = subprocess.run(ssh_base + ["date +%s.%N"], capture_output=True,
+                             text=True, timeout=timeout)
+        t1 = time.time()
+        if res.returncode != 0:
+            print(f"    [CLOCK] WARNING: could not read TDA clock "
+                  f"({res.stderr.strip()}) - skipping sync.")
+            return None
+        tda_before = float(res.stdout.strip())
+        offset = tda_before - (t0 + t1) / 2.0
+
+        host_now = time.time()
+        res2 = subprocess.run(ssh_base + [f"date -u -s @{host_now:.6f} >/dev/null"],
+                              capture_output=True, text=True, timeout=timeout)
+        if res2.returncode != 0:
+            print(f"    [CLOCK] TDA clock was {offset:+.3f}s vs host, but the "
+                  f"set command failed ({res2.stderr.strip()}) - IR/frame "
+                  f"timestamps may be misaligned by that much.")
+            return offset
+
+        print(f"    [CLOCK] TDA clock was {offset:+.3f}s vs host - resynced to host time.")
+        return offset
+    except subprocess.TimeoutExpired:
+        print(f"    [CLOCK] WARNING: SSH timeout syncing TDA clock - IR/frame "
+              f"timestamps may be misaligned.")
+        return None
+    except Exception as e:
+        print(f"    [CLOCK] WARNING: failed to sync TDA clock ({e}).")
+        return None
+
+
 def truncate_capture_padding(targets, capture_dir, tda_ip="192.168.33.180"):
     """
     Shrink pre-allocated capture files on the TDA down to their real payload.
@@ -329,7 +392,7 @@ def truncate_capture_padding(targets, capture_dir, tda_ip="192.168.33.180"):
     frames (it no longer has to extend the file while frames stream in), but TI
     fixes each pre-allocated file at 2047 MB regardless of how many frames were
     actually recorded - so a 300-frame capture writes ~940 MB of data inside a
-    2.0 GiB file. Left alone that doubles what pipeline.py has to SCP.
+    2.0 GiB file. Left alone that doubles what downstream transfer has to move.
 
     Truncating is safe because the frames are written contiguously from offset 0
     with a constant stride (verified via parse_idx.py: "payload extent: offset 0
@@ -405,8 +468,8 @@ def upload_files_to_tda(local_paths, capture_dir, tda_ip="192.168.33.180"):
     """
     SCP local metadata files (IR timestamps .npy, .mmwave.json config) up
     into /mnt/ssd/<capture_dir>/ on the TDA board, so they sit alongside the
-    raw .bin capture data and travel together through the existing
-    SCP-download-then-delete step in pipeline.py, instead of needing a
+    raw .bin capture data and travel together through whatever downstream
+    transfer step pulls the capture off the TDA, instead of needing a
     separate correlation step downstream.
 
     local_paths: iterable of local file paths (None/missing entries are

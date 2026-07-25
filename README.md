@@ -11,14 +11,13 @@ Two capture front-ends share the same hardware:
 
 | Path | Entry point | Config | Typical use |
 |------|-------------|--------|-------------|
-| **Python / Cython** | `mimo.py` (+ optional `pipeline.py`) | `radar_configs/*.toml` via `--radar-config` | Current workflow: raw IF capture |
+| **Python / Cython** | `mimo.py` | `radar_configs/*.toml` via `--radar-config` | Current workflow: raw IF capture |
 | **Legacy C binary** | `./mmwave` (from `mimo.c`) | `config/*.toml` via `-f` / `--cfg` | Original CLI, simple record |
 
 **Notes**
 - Only Ethernet to the TDA is supported (default IP `192.168.33.180`, port `5001`).
-- Raw captures land on the TDA SSD at `/mnt/ssd/<capture_dir>/`.
-- For **raw IF `.bin` only**, use `mimo.py` (or `./mmwave`). You do not need
-  LoRa, PS monitoring, or the cloud stack in `pipeline.py`.
+- Raw captures land on the TDA SSD at `/mnt/ssd/<capture_dir>/` and are not
+  auto-deleted — offload them with `fetch_to_usb.sh` or manual SSH/SCP.
 
 ---
 
@@ -42,10 +41,10 @@ mmwave-cli/
 ├── mmwcas.pyx               # Cython bridge to TI mmWaveLink (C structs zeroed;
 │                            #   all RF values come from TOML via mmw_set_config)
 ├── radar_config.py          # Loads radar_configs/*.toml
-├── radar_configs/           # TOML presets for mimo.py / pipeline.py
+├── radar_configs/           # TOML presets for mimo.py
 │   ├── cascade_tx3_rx16.toml   # default Python preset (3 TX chirps, Dev4 TX)
 │   └── cascade_mimo.toml       # TI full 12-chirp / 4-device MIMO (from Lua)
-├── pipeline.py              # Optional: capture → SCP → edge PS → LoRa
+├── fetch_to_usb.sh          # Offload captures from the TDA onto a USB drive
 ├── utility.py               # SCP helpers, .mmwave.json export, etc.
 ├── setup.py                 # Build mmwcas Cython extension
 ├── mimo.c / mimo.h          # Legacy C capture tool → builds ./mmwave
@@ -99,15 +98,13 @@ make build
 5. Uploads those sidecars into `/mnt/ssd/<capture_dir>/` next to the raw `.bin`s
 6. Exits (single capture per process invocation)
 
-It does **not** run edge processing or LoRa.
-
 **No built-in repeat-capture loop** (removed): running several captures
 back-to-back within the same process - even with a real cooldown between
 them - still showed capture sizes drifting smaller for identical `--frames`,
 most likely an SSD/network throughput ceiling on the TDA (frame drops), not
 something fixable host-side. For repeated captures, run `mimo.py` again
-(fresh process each time) via a shell loop / cron / `pipeline.py`, so you
-control spacing and each capture gets a fully fresh `mmw_init()`.
+(fresh process each time) via a shell loop / cron, so you control spacing
+and each capture gets a fully fresh `mmw_init()`.
 
 ### Typical usage (raw IF only)
 
@@ -154,7 +151,7 @@ fixable host-side:
   run to run) - see `mimo.py`'s module docstring.
 
 For real captures, use `mimo.py` (one exact capture per process invocation)
-driven by `pipeline.py` or an external shell loop instead.
+driven by an external shell loop instead.
 
 ```bash
 python3 mimo_interactive.py --frames 100
@@ -309,57 +306,16 @@ Examples live in `config/`. If `-f` is omitted, hardcoded defaults inside
 
 ---
 
-## 3. Optional: `pipeline.py`
+## 3. Fetching raw data from the TDA
 
-Orchestrates a longer monitoring loop. **Step 1 is a subprocess call to `mimo.py`.**
-
-```
-pipeline.py
-  ├─ Step 1  Capture          → runs mimo.py
-  ├─ Step 2  Transfer          → SCP TDA → ~/IoSAR-EdgeProcessing/PostProc/
-  ├─ Step 3  SLC images        → only with --debug
-  ├─ Step 4  PS monitoring    → vibration metrics (needs EdgeProcessing repo)
-  └─ Step 5  LoRa uplink      → Wio-E5 → TTN (optional cloud path)
-```
-
-### If you only want raw `.bin` on the Pi
-
-Prefer `mimo.py` alone, then SCP yourself. Or use pipeline with processing/LoRa skipped:
+Captures are **not** auto-deleted from the TDA's SSD after a capture, so pull
+them off explicitly:
 
 ```bash
-python3 pipeline.py --frames 100 --label my_capture \
-  --radar-config cascade_tx3_rx16 \
-  --skip-ps --skip-lora
-```
+# Recommended: mount a USB drive and interactively pick a capture to copy
+./fetch_to_usb.sh /dev/sda1
 
-### Full monitoring example (original SHM workflow)
-
-```bash
-python3 pipeline.py --frames 150 --label RPI_python_bridge \
-  --radar-config cascade_tx3_rx16
-```
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--frames` | `100` | Radar frames (passed to `mimo.py`) |
-| `--label` | `RPI_python` | Capture prefix |
-| `--tda-ip` | `192.168.33.180` | TDA IP |
-| `--radar-config` | `cascade_tx3_rx16` | Passed through to `mimo.py` |
-| `-i` / `--interval` | `0` | Wait between cycles (s) |
-| `--debug` | off | Also generate SLC / range-profile |
-| `--skip-transfer` | off | Skip SCP |
-| `--skip-ps` | off | Skip PS monitoring |
-| `--skip-lora` | off | Skip LoRa |
-| `--ps-file` | none | Manual PS JSON |
-
-LoRa / TTN / Grafana are for remote vibration dashboards. They are **not**
-required for raw IF capture.
-
----
-
-## 4. Fetching raw data from the TDA
-
-```bash
+# Or manually:
 # List captures
 ssh -oHostKeyAlgorithms=+ssh-rsa -oPubkeyAcceptedAlgorithms=+ssh-rsa \
   root@192.168.33.180 'ls -lh /mnt/ssd'
@@ -375,23 +331,22 @@ the uploaded `.mmwave.json` / IR `.npy` sidecars).
 
 ---
 
-## 5. Which tool should I use?
+## 4. Which tool should I use?
 
 | Goal | Use |
 |------|-----|
 | Raw IF `.bin` only (recommended) | `python3 mimo.py --frames … --radar-config …` |
 | Same, but legacy C CLI | `./mmwave -c -r -t … [-f config/….toml]` |
-| Capture + auto SCP + PS + LoRa | `python3 pipeline.py …` |
-| Capture + SCP only | `pipeline.py … --skip-ps --skip-lora` |
+| Offload captures off the TDA | `./fetch_to_usb.sh /dev/sdXX` |
 
 ---
 
-## 6. Config path cheat-sheet
+## 5. Config path cheat-sheet
 
 | Front-end | TOML location | Select how |
 |-----------|---------------|------------|
 | `./mmwave` | `config/*.toml` | `-f config/short-range-cfg.toml` |
-| `mimo.py` / `pipeline.py` | `radar_configs/*.toml` | `--radar-config cascade_tx3_rx16` |
+| `mimo.py` | `radar_configs/*.toml` | `--radar-config cascade_tx3_rx16` |
 
 Built-in Python presets:
 
@@ -400,7 +355,7 @@ Built-in Python presets:
 
 ---
 
-## 7. Developer notes
+## 6. Developer notes
 
 - Do not casually edit `ti/mmwavelink` or `ti/firmware` (TI-provided).
 - `ti/ethernet` and `ti/mmwave` are Linux ports of TI examples.

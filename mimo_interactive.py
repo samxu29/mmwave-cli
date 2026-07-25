@@ -17,7 +17,7 @@ hardware issues, neither fixable from the host side:
      arbitrary number of back-to-back captures).
 
 For real captures, use `mimo.py` (single exact capture per process
-invocation) driven by `pipeline.py` or an external shell loop instead.
+invocation) driven by an external shell loop instead.
 
 This script is a thin wrapper: it imports mimo.py and reuses its
 mmw_set_config()/mmw_init()/run_one_capture()/IR-sensor machinery directly
@@ -86,7 +86,7 @@ def run_interactive(args):
 
 def main():
     print("*** mimo_interactive.py is DEPRECATED - bench/manual testing only. ***")
-    print("*** For real captures use mimo.py (via pipeline.py or a shell loop). ***\n")
+    print("*** For real captures use mimo.py (via a shell loop). ***\n")
 
     parser = argparse.ArgumentParser(
         description='[DEPRECATED] TIDEP-01012 MIMO Cascade Radar - interactive REPL capture')
