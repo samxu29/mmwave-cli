@@ -1,7 +1,11 @@
 import os
+import struct
 import subprocess
 import sys
+import tempfile
 import time
+
+import numpy as np
 
 
 class TeeLogger:
@@ -409,6 +413,100 @@ def sync_tda_clock(tda_ip="192.168.33.180", timeout=15):
     except Exception as e:
         print(f"    [CLOCK] WARNING: failed to sync TDA clock ({e}).")
         return None
+
+
+_IDX_HEADER_FMT = "<IIIIQ"          # tag, version, flags, numIdx, dataFileSize
+_IDX_HEADER_SIZE = struct.calcsize(_IDX_HEADER_FMT)
+_IDX_ENTRY_FMT = "<HHIHH4IIQQ"      # tag,ver,flags,w,h,meta[4],size,timestamp,offset
+_IDX_ENTRY_SIZE = struct.calcsize(_IDX_ENTRY_FMT)
+
+
+def fetch_frame_timestamps(capture_dir, tda_ip="192.168.33.180", period_ms=100.0,
+                           dest_dir="frame_timestamps", timeout=30):
+    """
+    Pull one *_idx.bin (prefers a device named "master*") from
+    /mnt/ssd/<capture_dir>/ on the TDA, decode its per-frame `timestamp`
+    field (same idx.bin layout as parse_idx.py), and save it locally as
+    dest_dir/<capture_dir>_frame_timestamps.npy - a float64 array with one
+    entry per frame the TDA actually captured, so it naturally reflects any
+    dropped frames instead of assuming N contiguous frames at the nominal
+    period (see "CONSEQUENCE FOR DOWNSTREAM" in mimo.py's docstring for why
+    that assumption is wrong).
+
+    Units are seconds, but on the TDA's own MONOTONIC clock - empirically
+    confirmed NOT to be wall-clock/Unix-epoch time (see
+    check_ir_timestamps.py's docstring: raw values are on the order of TDA
+    uptime, nowhere near an epoch). This is NOT comparable to the host-clock
+    IR sensor timestamps or real-world time - only inter-frame spacing
+    within this array is meaningful. us-vs-ms unit auto-detection uses the
+    same trick as parse_idx.py (compare the median inter-frame delta against
+    the nominal frame period), since a given SDK build's units aren't
+    otherwise guaranteed.
+
+    Best-effort: never raises. Returns the local .npy path, or None if the
+    idx.bin couldn't be fetched or parsed - a capture is still usable
+    without this sidecar, it's the same per-frame timing parse_idx.py
+    already extracts manually, just automatic and saved as plain data every
+    capture.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        cmd = [
+            "scp", "-O",
+            "-oHostKeyAlgorithms=+ssh-rsa",
+            "-oPubkeyAcceptedAlgorithms=+ssh-rsa",
+            "-oStrictHostKeyChecking=no",
+            "-oConnectTimeout=10",
+            f"root@{tda_ip}:/mnt/ssd/{capture_dir}/*_idx.bin",
+            tmp,
+        ]
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            print(f"    [FRAME TS] WARNING: SCP of idx.bin timed out - skipping "
+                  f"per-frame timestamp export.")
+            return None
+        if res.returncode != 0:
+            print(f"    [FRAME TS] WARNING: could not fetch idx.bin "
+                  f"({res.stderr.strip()}) - skipping per-frame timestamp export.")
+            return None
+
+        idx_files = sorted(f for f in os.listdir(tmp) if f.endswith("_idx.bin"))
+        if not idx_files:
+            print(f"    [FRAME TS] WARNING: no *_idx.bin fetched - skipping "
+                  f"per-frame timestamp export.")
+            return None
+        idx_name = next((f for f in idx_files if f.startswith("master")), idx_files[0])
+
+        try:
+            with open(os.path.join(tmp, idx_name), "rb") as f:
+                raw = f.read()
+            if len(raw) < _IDX_HEADER_SIZE:
+                raise ValueError(f"{idx_name}: too small to hold a header ({len(raw)} B)")
+            body = raw[_IDX_HEADER_SIZE:]
+            n = len(body) // _IDX_ENTRY_SIZE
+            ts_raw = [struct.unpack_from(_IDX_ENTRY_FMT, body, i * _IDX_ENTRY_SIZE)[10]
+                      for i in range(n)]
+        except (OSError, ValueError, struct.error) as e:
+            print(f"    [FRAME TS] WARNING: could not parse {idx_name} ({e}) - "
+                  f"skipping per-frame timestamp export.")
+            return None
+
+    if len(ts_raw) < 2:
+        print(f"    [FRAME TS] WARNING: only {len(ts_raw)} frame(s) in {idx_name} "
+              f"- skipping per-frame timestamp export.")
+        return None
+
+    deltas = sorted(ts_raw[i + 1] - ts_raw[i] for i in range(len(ts_raw) - 1))
+    med = deltas[len(deltas) // 2]
+    to_s = 1e-6 if med >= period_ms * 100 else 1e-3   # us vs ms, like parse_idx.py
+    ts_s = np.array([t * to_s for t in ts_raw], dtype=np.float64)
+
+    os.makedirs(dest_dir, exist_ok=True)
+    path = os.path.join(dest_dir, f"{capture_dir}_frame_timestamps.npy")
+    np.save(path, ts_s)
+    print(f"    [FRAME TS] Saved {len(ts_s)} per-frame timestamp(s) from {idx_name} "
+          f"to {path} (TDA monotonic clock, seconds - NOT wall-clock/host-comparable)")
+    return path
 
 
 def truncate_capture_padding(targets, capture_dir, tda_ip="192.168.33.180"):

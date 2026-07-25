@@ -120,6 +120,7 @@ from utility import upload_files_to_tda
 from utility import truncate_capture_padding
 from utility import read_tda_thermal
 from utility import sync_tda_clock
+from utility import fetch_frame_timestamps
 from utility import TeeLogger
 from radar_config import RADAR_CONFIGS, DEFAULT_RADAR_CONFIG, get_radar_config
 import os
@@ -711,6 +712,11 @@ def run_one_capture(exp_label, num_frames, tda_ip, prealloc_files=None,
     timestamps - that field is a separate monotonic counter, unaffected by
     the OS date. Use check_ir_timestamps.py's duration cross-check instead.
 
+    After the capture, also fetches that same idx.bin and exports its
+    per-frame timestamps to frame_timestamps/<capture_dir>_frame_timestamps.npy
+    (see utility.fetch_frame_timestamps()) - one entry per frame actually
+    captured, TDA monotonic clock (seconds, not wall-clock).
+
     Capture length is num_frames: the host waits
     num_frames × framePeriodicity + one period margin before calling
     mmw_stop_frame(). This is wall-clock-based, not hardware-exact - actual
@@ -830,6 +836,15 @@ def run_one_capture(exp_label, num_frames, tda_ip, prealloc_files=None,
     # still usable, just shorter than asked for.
     _warn_on_frame_drops(files, num_frames, config_dict)
 
+    # Per-frame timestamps straight from the TDA's own idx.bin (one entry
+    # per frame ACTUALLY captured, so it naturally reflects any drops,
+    # unlike assuming N contiguous frames at the nominal period). TDA
+    # monotonic clock, not wall-clock - see fetch_frame_timestamps()'s
+    # docstring. Saved locally and uploaded alongside the IR timestamps +
+    # .mmwave.json below.
+    frame_ts_path = fetch_frame_timestamps(
+        capture_dir, tda_ip, float(config_dict["mimo"]["frame"]["framePeriodicity"]))
+
     # Give back the pre-allocation padding (each reserved file is a fixed
     # 2047 MB) so downstream transfer only moves real frames.
     if reclaim_padding:
@@ -841,12 +856,12 @@ def run_one_capture(exp_label, num_frames, tda_ip, prealloc_files=None,
     print(f"\nGenerating configuration file: {json_filename}")
     export_config_to_json(config_dict, json_filename)
 
-    # Push the IR timestamps + config sidecar up into the same TDA capture
-    # directory as the raw .bin data, so they travel together through
-    # whatever downstream transfer step (e.g. fetch_to_usb.sh) pulls the
-    # capture off the TDA, instead of needing separate correlation after
-    # the fact.
-    upload_files_to_tda([ir_npy_path, json_filename], capture_dir, tda_ip)
+    # Push the IR timestamps + frame timestamps + config sidecar up into the
+    # same TDA capture directory as the raw .bin data, so they travel
+    # together through whatever downstream transfer step (e.g.
+    # fetch_to_usb.sh) pulls the capture off the TDA, instead of needing
+    # separate correlation after the fact.
+    upload_files_to_tda([ir_npy_path, frame_ts_path, json_filename], capture_dir, tda_ip)
 
     return status, capture_dir
 
