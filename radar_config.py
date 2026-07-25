@@ -31,7 +31,16 @@ length-4 list [Dev1, Dev2, Dev3, Dev4] for per-device RX enable
 """
 import os
 
-import tomli as tomllib
+try:
+    import tomllib                          # Python 3.11+
+except ModuleNotFoundError:
+    try:
+        import tomli as tomllib             # Python < 3.11
+    except ModuleNotFoundError as e:
+        raise ModuleNotFoundError(
+            "Need a TOML reader: Python 3.11+ has tomllib in the stdlib; "
+            "on older Python install tomli with:  pip install tomli"
+        ) from e
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
