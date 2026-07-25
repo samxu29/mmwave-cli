@@ -1,23 +1,29 @@
 """
-mimo_interactive.py - DEPRECATED interactive REPL for mimo.py's radar capture
+mimo_interactive.py - interactive REPL for mimo.py's radar capture
 (TIDEP-01012 MIMO Cascade Radar).
 
-*** DEPRECATED (2026-07-22) *** - kept only for ad-hoc manual testing at the
-bench. Do NOT use for real data collection / bridge deployment. Two known
-hardware issues, neither fixable from the host side:
+Configure the RF chips once, then repeat many named captures without
+re-launching the process. The frame count is fixed for the whole session -
+set once via --frames at startup, applied to every capture - rather than
+overridable per prompt. Each prompt takes only an experiment name. This
+keeps every capture in the session identical in length (same TDA
+pre-allocation sizing, same arm/wait/stop timing), which is what varying
+per-prompt frame counts put at risk: mismatched pre-allocation and wait
+windows are a contributor to dropped frames, so removing that source of
+variation lowers drop chances across a session.
+
+Two known hardware constraints remain, neither fixable from the host side:
   1. Frame counts here are wall-clock-based, not hardware-exact (the RF
-     chips are configured once at startup with numFrames=0/infinite; each
-     prompt's frame count only controls how long we wait before
+     chips are configured once at startup with numFrames=0/infinite; the
+     fixed frame count only controls how long we wait before
      mmw_stop_frame()). A live per-capture RF reconfigure was tried and
      reverted after it wedged the RF chips on real hardware.
   2. Repeated captures within one long-lived process are exactly the
      scenario that showed SSD/network throughput drift (capture sizes
      shrinking run to run) - see mimo.py's docstring. This script is
      structurally the worst case for that (a single process making an
-     arbitrary number of back-to-back captures).
-
-For real captures, use `mimo.py` (single exact capture per process
-invocation) driven by `pipeline.py` or an external shell loop instead.
+     arbitrary number of back-to-back captures) - keep sessions short and
+     watch for drift on long runs.
 
 This script is a thin wrapper: it imports mimo.py and reuses its
 mmw_set_config()/mmw_init()/run_one_capture()/IR-sensor machinery directly
@@ -38,21 +44,24 @@ from radar_config import RADAR_CONFIGS, DEFAULT_RADAR_CONFIG, get_radar_config
 def run_interactive(args):
     """
     REPL loop: configure once (RF numFrames=0, i.e. infinite framing), then
-    repeatedly prompt for an experiment name and optional frame count. Each
-    capture arms the TDA and waits num_frames x framePeriodicity (+ margin)
-    before calling mmw_stop_frame() - no RF reconfiguration between captures
-    (see mimo.run_one_capture()'s docstring for why). Frame counts here are
+    repeatedly prompt for an experiment name only. Every capture in the
+    session uses the same fixed args.frames count, set once at startup -
+    each capture arms the TDA and waits args.frames x framePeriodicity
+    (+ margin) before calling mmw_stop_frame() - no RF reconfiguration
+    between captures (see mimo.run_one_capture()'s docstring for why), and
+    no per-prompt frame-count override, so TDA pre-allocation sizing and
+    wait timing stay identical capture to capture. Frame counts are
     therefore approximate (wall-clock based, a few % jitter run to run), not
     hardware-exact.
     """
     period_ms = float(mimo.config_dict["mimo"]["frame"]["framePeriodicity"])
-    print("\n=== Interactive multi-capture mode [DEPRECATED] ===")
+    print("\n=== Interactive multi-capture mode ===")
     print("Radar is configured and the connection to the TDA is live.")
+    print(f"Every capture in this session uses {args.frames} frames "
+          f"(~{args.frames * period_ms / 1000.0:.1f}s @ {period_ms:.0f} ms/frame) - "
+          "fixed at startup via --frames.")
     print("At the prompt, type an experiment name to arm + record, e.g.:")
-    print(f"  bridge_test          (uses --frames default: {args.frames})")
-    print(f"  bridge_test 300      (300 frames for this capture only)")
-    print("Frame counts are wall-clock based (approximate, +/- a few % run to "
-          "run) - the RF chips are NOT reconfigured per prompt.")
+    print("  bridge_test")
     print(f"Frame period: {period_ms:.0f} ms  ({1000.0/period_ms:.1f} fps)")
     print("Type 'quit'/'exit' or leave blank to stop.\n")
 
@@ -66,16 +75,11 @@ def run_interactive(args):
 
         parts = line.split()
         exp_name = parts[0]
-        try:
-            num_frames = int(parts[1]) if len(parts) >= 2 else args.frames
-        except ValueError:
-            print(f"Could not parse frame count; using default {args.frames}.")
-            num_frames = args.frames
-        if num_frames < 1:
-            print("Frame count must be >= 1; using configured --frames.")
-            num_frames = args.frames
+        if len(parts) > 1:
+            print(f"Frame count is fixed for this session ({args.frames}); "
+                  f"ignoring extra input {parts[1:]}.")
 
-        status, capture_dir = mimo.run_one_capture(exp_name, num_frames, args.tda_ip)
+        status, capture_dir = mimo.run_one_capture(exp_name, args.frames, args.tda_ip)
         if status == 0:
             print(f">>> Capture '{capture_dir}' completed successfully.\n")
         else:
@@ -85,16 +89,13 @@ def run_interactive(args):
 
 
 def main():
-    print("*** mimo_interactive.py is DEPRECATED - bench/manual testing only. ***")
-    print("*** For real captures use mimo.py (via pipeline.py or a shell loop). ***\n")
-
     parser = argparse.ArgumentParser(
-        description='[DEPRECATED] TIDEP-01012 MIMO Cascade Radar - interactive REPL capture')
+        description='TIDEP-01012 MIMO Cascade Radar - interactive REPL capture')
     parser.add_argument('--frames',
                         type=int,
                         default=100,
-                        help='Default frame count per capture (override per-prompt: '
-                             '"<name> <frames>"). Default: 100.')
+                        help='Frame count for every capture in this session, fixed at '
+                             'startup (no per-prompt override). Default: 100.')
     parser.add_argument('--tda-ip',
                         type=str,
                         default='192.168.33.180',
@@ -133,12 +134,14 @@ def main():
     period_ms = float(mimo.config_dict["mimo"]["frame"]["framePeriodicity"])
     approx_s = args.frames * period_ms / 1000.0
 
-    # RF chips stay at numFrames=0 (infinite) so each prompt can request a
-    # different length via TDA arming rather than RF reconfiguration.
+    # RF chips stay at numFrames=0 (infinite) - every capture's length is
+    # controlled by how long we wait before mmw_stop_frame() (TDA arming),
+    # not by RF reconfiguration. That wait is the same fixed args.frames for
+    # the whole session (see run_interactive()'s docstring for why).
     mimo.config_dict["mimo"]["frame"]["numFrames"] = 0
 
     print(f"Capture frames   : {args.frames}  (~{approx_s:.1f}s @ {period_ms:.0f} ms/frame)"
-          "  [default; override per prompt]")
+          "  [fixed for this session]")
     print(f"Radar config     : {args.radar_config}")
 
     status = mmwcas.mmw_set_config(mimo.config_dict)

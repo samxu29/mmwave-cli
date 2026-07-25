@@ -61,8 +61,14 @@ python3 -c "import mmwcas; print('mmwcas OK')"
   built-in loop - repeated same-process captures showed SSD/network
   throughput drift; use `pipeline.py` or an external shell loop instead).
   The old `-I`/`--interactive` REPL mode (configure once, loop on typed
-  experiment names) has moved to `mimo_interactive.py` and is
-  **DEPRECATED** (bench/manual testing only, not for real captures).
+  experiment names) has moved to `mimo_interactive.py`. Frame count is
+  fixed for the whole session (set once via `--frames` at startup, not
+  overridable per prompt) to keep TDA pre-allocation sizing and wait
+  timing identical capture to capture, lowering drop risk — each prompt
+  takes only an experiment name. Same hardware caveats as before apply:
+  wall-clock-based frame counts (RF chips stay at `numFrames=0`/infinite)
+  and SSD/network throughput drift risk on long back-to-back-capture
+  sessions within one process.
 - `dt` in edge processing is read automatically from `.mmwave.json` per capture (falls back to `DT_DEFAULT = 0.05`)
 - IR sensor timestamp logging is built directly into `mimo.py` (replaces the old
   `run_experiment.sh` + `ir_logger.py` signal-based glue, both removed): GPIO
@@ -85,7 +91,7 @@ python3 -c "import mmwcas; print('mmwcas OK')"
 ```
 mmwave-cli/                         ← this repo (runs on Raspberry Pi ~/mmwave-cli/)
 ├── mimo.py                         ← radar control: configure, arm, capture, stop
-├── mimo_interactive.py             ← [DEPRECATED] REPL wrapper around mimo.py — bench/manual only
+├── mimo_interactive.py             ← REPL wrapper around mimo.py — fixed frame count/session, name-only prompts
 ├── radar_config.py                 ← loads RF/geometry presets from radar_configs/*.toml
 ├── radar_configs/                  ← RF/geometry presets (TOML), select via --radar-config <name>
 │   └── default.toml
