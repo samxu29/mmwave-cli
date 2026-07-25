@@ -120,7 +120,8 @@ from utility import upload_files_to_tda
 from utility import truncate_capture_padding
 from utility import read_tda_thermal
 from utility import sync_tda_clock
-from utility import fetch_frame_timestamps
+from utility import fetch_rf_frame_timestamps
+from utility import save_rpi_frame_timestamps
 from utility import TeeLogger
 from radar_config import RADAR_CONFIGS, DEFAULT_RADAR_CONFIG, get_radar_config
 import os
@@ -710,12 +711,20 @@ def run_one_capture(exp_label, num_frames, tda_ip, prealloc_files=None,
     etc.) drifts from real time. NOTE: this does NOT make the per-frame
     timestamps in <dev>_0000_idx.bin comparable to the IR sensor's host-clock
     timestamps - that field is a separate monotonic counter, unaffected by
-    the OS date. Use check_ir_timestamps.py's duration cross-check instead.
+    the OS date. See the two per-frame timestamp exports below instead.
 
-    After the capture, also fetches that same idx.bin and exports its
-    per-frame timestamps to frame_timestamps/<capture_dir>_frame_timestamps.npy
-    (see utility.fetch_frame_timestamps()) - one entry per frame actually
-    captured, TDA monotonic clock (seconds, not wall-clock).
+    After the capture, fetches that same idx.bin and exports two per-frame
+    timestamp sidecars (see check_timestamp.py for reading/cross-checking
+    them):
+      - rf_frame_timestamps/<capture_dir>_rf_frame_timestamps.npy: the RF/DSP
+        side's own per-frame timestamp, TDA monotonic clock (seconds, not
+        wall-clock) - see utility.fetch_rf_frame_timestamps().
+      - rpi_frame_timestamps/<capture_dir>_rpi_frame_timestamps.npy: this
+        host's estimate of when each of those same frames occurred, on this
+        host's OWN clock (directly comparable to the IR sensor timestamps) -
+        built by anchoring the RF timestamps' relative spacing to this
+        host's time.time() at the moment mmw_start_frame() returned - see
+        utility.save_rpi_frame_timestamps().
 
     Capture length is num_frames: the host waits
     num_frames × framePeriodicity + one period margin before calling
@@ -790,6 +799,11 @@ def run_one_capture(exp_label, num_frames, tda_ip, prealloc_files=None,
         print(f"mmw_start_frame failed (status: {status})")
         return status, capture_dir
 
+    # This host's clock at the moment framing is confirmed to have started -
+    # the anchor save_rpi_frame_timestamps() uses to build a host-epoch
+    # per-frame array from the RF side's per-frame spacing.
+    host_start_time = time.time()
+
     print(f"\n Capturing... ({num_frames} frames, waiting {wait_s:.2f}s)")
     time.sleep(wait_s)
     ir_recording = False
@@ -838,12 +852,16 @@ def run_one_capture(exp_label, num_frames, tda_ip, prealloc_files=None,
 
     # Per-frame timestamps straight from the TDA's own idx.bin (one entry
     # per frame ACTUALLY captured, so it naturally reflects any drops,
-    # unlike assuming N contiguous frames at the nominal period). TDA
-    # monotonic clock, not wall-clock - see fetch_frame_timestamps()'s
-    # docstring. Saved locally and uploaded alongside the IR timestamps +
-    # .mmwave.json below.
-    frame_ts_path = fetch_frame_timestamps(
+    # unlike assuming N contiguous frames at the nominal period). RF side's
+    # own (TDA monotonic clock, not wall-clock) plus this host's anchored
+    # estimate of the same frames on ITS clock (host epoch, directly
+    # comparable to the IR timestamps) - see fetch_rf_frame_timestamps()'s
+    # and save_rpi_frame_timestamps()'s docstrings. Saved locally and
+    # uploaded alongside the IR timestamps + .mmwave.json below.
+    rf_frame_ts_path, rf_frame_ts = fetch_rf_frame_timestamps(
         capture_dir, tda_ip, float(config_dict["mimo"]["frame"]["framePeriodicity"]))
+    rpi_frame_ts_path = save_rpi_frame_timestamps(
+        rf_frame_ts, host_start_time, capture_dir)
 
     # Give back the pre-allocation padding (each reserved file is a fixed
     # 2047 MB) so downstream transfer only moves real frames.
@@ -856,12 +874,13 @@ def run_one_capture(exp_label, num_frames, tda_ip, prealloc_files=None,
     print(f"\nGenerating configuration file: {json_filename}")
     export_config_to_json(config_dict, json_filename)
 
-    # Push the IR timestamps + frame timestamps + config sidecar up into the
-    # same TDA capture directory as the raw .bin data, so they travel
-    # together through whatever downstream transfer step (e.g.
-    # fetch_to_usb.sh) pulls the capture off the TDA, instead of needing
-    # separate correlation after the fact.
-    upload_files_to_tda([ir_npy_path, frame_ts_path, json_filename], capture_dir, tda_ip)
+    # Push the IR timestamps + both frame timestamp sidecars + config
+    # sidecar up into the same TDA capture directory as the raw .bin data,
+    # so they travel together through whatever downstream transfer step
+    # (e.g. fetch_to_usb.sh) pulls the capture off the TDA, instead of
+    # needing separate correlation after the fact.
+    upload_files_to_tda([ir_npy_path, rf_frame_ts_path, rpi_frame_ts_path, json_filename],
+                        capture_dir, tda_ip)
 
     return status, capture_dir
 

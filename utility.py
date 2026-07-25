@@ -421,33 +421,36 @@ _IDX_ENTRY_FMT = "<HHIHH4IIQQ"      # tag,ver,flags,w,h,meta[4],size,timestamp,o
 _IDX_ENTRY_SIZE = struct.calcsize(_IDX_ENTRY_FMT)
 
 
-def fetch_frame_timestamps(capture_dir, tda_ip="192.168.33.180", period_ms=100.0,
-                           dest_dir="frame_timestamps", timeout=30):
+def fetch_rf_frame_timestamps(capture_dir, tda_ip="192.168.33.180", period_ms=100.0,
+                              dest_dir="rf_frame_timestamps", timeout=30):
     """
     Pull one *_idx.bin (prefers a device named "master*") from
     /mnt/ssd/<capture_dir>/ on the TDA, decode its per-frame `timestamp`
     field (same idx.bin layout as parse_idx.py), and save it locally as
-    dest_dir/<capture_dir>_frame_timestamps.npy - a float64 array with one
-    entry per frame the TDA actually captured, so it naturally reflects any
-    dropped frames instead of assuming N contiguous frames at the nominal
-    period (see "CONSEQUENCE FOR DOWNSTREAM" in mimo.py's docstring for why
-    that assumption is wrong).
+    dest_dir/<capture_dir>_rf_frame_timestamps.npy - a float64 array with
+    one entry per frame the TDA actually captured, so it naturally reflects
+    any dropped frames instead of assuming N contiguous frames at the
+    nominal period (see "CONSEQUENCE FOR DOWNSTREAM" in mimo.py's docstring
+    for why that assumption is wrong).
 
-    Units are seconds, but on the TDA's own MONOTONIC clock - empirically
-    confirmed NOT to be wall-clock/Unix-epoch time (see
-    check_ir_timestamps.py's docstring: raw values are on the order of TDA
-    uptime, nowhere near an epoch). This is NOT comparable to the host-clock
-    IR sensor timestamps or real-world time - only inter-frame spacing
-    within this array is meaningful. us-vs-ms unit auto-detection uses the
-    same trick as parse_idx.py (compare the median inter-frame delta against
-    the nominal frame period), since a given SDK build's units aren't
-    otherwise guaranteed.
+    "RF" because this is the RF/DSP side's own timestamp - units are
+    seconds, but on the TDA's own MONOTONIC clock, empirically confirmed
+    NOT to be wall-clock/Unix-epoch time (see check_timestamp.py's
+    docstring: raw values are on the order of TDA uptime, nowhere near an
+    epoch). This is NOT comparable to the host-clock IR sensor timestamps
+    or real-world time on its own - only inter-frame spacing within this
+    array is meaningful. See save_rpi_frame_timestamps() for the
+    host-epoch-comparable counterpart built from this array's relative
+    spacing. us-vs-ms unit auto-detection uses the same trick as
+    parse_idx.py (compare the median inter-frame delta against the nominal
+    frame period), since a given SDK build's units aren't otherwise
+    guaranteed.
 
-    Best-effort: never raises. Returns the local .npy path, or None if the
-    idx.bin couldn't be fetched or parsed - a capture is still usable
-    without this sidecar, it's the same per-frame timing parse_idx.py
-    already extracts manually, just automatic and saved as plain data every
-    capture.
+    Best-effort: never raises. Returns (local .npy path, numpy array), or
+    (None, None) if the idx.bin couldn't be fetched or parsed - a capture is
+    still usable without this sidecar, it's the same per-frame timing
+    parse_idx.py already extracts manually, just automatic and saved as
+    plain data every capture.
     """
     with tempfile.TemporaryDirectory() as tmp:
         cmd = [
@@ -464,17 +467,17 @@ def fetch_frame_timestamps(capture_dir, tda_ip="192.168.33.180", period_ms=100.0
         except subprocess.TimeoutExpired:
             print(f"    [FRAME TS] WARNING: SCP of idx.bin timed out - skipping "
                   f"per-frame timestamp export.")
-            return None
+            return None, None
         if res.returncode != 0:
             print(f"    [FRAME TS] WARNING: could not fetch idx.bin "
                   f"({res.stderr.strip()}) - skipping per-frame timestamp export.")
-            return None
+            return None, None
 
         idx_files = sorted(f for f in os.listdir(tmp) if f.endswith("_idx.bin"))
         if not idx_files:
             print(f"    [FRAME TS] WARNING: no *_idx.bin fetched - skipping "
                   f"per-frame timestamp export.")
-            return None
+            return None, None
         idx_name = next((f for f in idx_files if f.startswith("master")), idx_files[0])
 
         try:
@@ -489,12 +492,12 @@ def fetch_frame_timestamps(capture_dir, tda_ip="192.168.33.180", period_ms=100.0
         except (OSError, ValueError, struct.error) as e:
             print(f"    [FRAME TS] WARNING: could not parse {idx_name} ({e}) - "
                   f"skipping per-frame timestamp export.")
-            return None
+            return None, None
 
     if len(ts_raw) < 2:
         print(f"    [FRAME TS] WARNING: only {len(ts_raw)} frame(s) in {idx_name} "
               f"- skipping per-frame timestamp export.")
-        return None
+        return None, None
 
     deltas = sorted(ts_raw[i + 1] - ts_raw[i] for i in range(len(ts_raw) - 1))
     med = deltas[len(deltas) // 2]
@@ -502,10 +505,45 @@ def fetch_frame_timestamps(capture_dir, tda_ip="192.168.33.180", period_ms=100.0
     ts_s = np.array([t * to_s for t in ts_raw], dtype=np.float64)
 
     os.makedirs(dest_dir, exist_ok=True)
-    path = os.path.join(dest_dir, f"{capture_dir}_frame_timestamps.npy")
+    path = os.path.join(dest_dir, f"{capture_dir}_rf_frame_timestamps.npy")
     np.save(path, ts_s)
-    print(f"    [FRAME TS] Saved {len(ts_s)} per-frame timestamp(s) from {idx_name} "
+    print(f"    [FRAME TS] Saved {len(ts_s)} RF per-frame timestamp(s) from {idx_name} "
           f"to {path} (TDA monotonic clock, seconds - NOT wall-clock/host-comparable)")
+    return path, ts_s
+
+
+def save_rpi_frame_timestamps(rf_frame_ts, host_start_time, capture_dir,
+                              dest_dir="rpi_frame_timestamps"):
+    """
+    Build a host-epoch-comparable per-frame timestamp array by anchoring
+    the RF side's own relative per-frame spacing (rf_frame_ts, which already
+    correctly skips any dropped frames - see fetch_rf_frame_timestamps()) to
+    a single host-clock reference point: host_start_time, this host's
+    time.time() recorded right when mmw_start_frame() returned successfully
+    (i.e., right as frame 0 began).
+
+        rpi_frame_ts[i] = host_start_time + (rf_frame_ts[i] - rf_frame_ts[0])
+
+    This IS directly comparable to the IR sensor's host-clock timestamps -
+    unlike rf_frame_timestamps.npy. The only assumption is that
+    host_start_time and rf_frame_ts[0] correspond to the same real moment
+    (frame 0 starting) - a small, roughly constant RPC/hardware latency
+    between the host issuing mmw_start_frame() and the RF chips actually
+    emitting frame 0, not the multi-rotation-period ambiguity that made
+    aligning against arbitrary IR markers only approximate.
+
+    Best-effort: never raises. Returns the local .npy path, or None if
+    rf_frame_ts is empty/None.
+    """
+    if rf_frame_ts is None or len(rf_frame_ts) == 0:
+        return None
+    rpi_ts = (host_start_time + (np.asarray(rf_frame_ts, dtype=np.float64)
+                                 - rf_frame_ts[0])).astype(np.float64)
+    os.makedirs(dest_dir, exist_ok=True)
+    path = os.path.join(dest_dir, f"{capture_dir}_rpi_frame_timestamps.npy")
+    np.save(path, rpi_ts)
+    print(f"    [FRAME TS] Saved {len(rpi_ts)} RPi-anchored per-frame timestamp(s) "
+          f"to {path} (host epoch clock - directly comparable to IR timestamps)")
     return path
 
 

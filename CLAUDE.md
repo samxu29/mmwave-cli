@@ -76,9 +76,10 @@ python3 -c "import mmwcas; print('mmwcas OK')"
   Disable with `--no-ir`; override pin/debounce with `--ir-pin`/`--ir-bounce-ms`.
   Silently disabled with a printed notice if `RPi.GPIO` isn't importable (e.g. off-Pi).
 - After a successful capture, `run_one_capture()` SCPs the local IR timestamps
-  `.npy` and `.mmwave.json` up into `/mnt/ssd/<capture_dir>/` on the TDA
-  (`utility.upload_files_to_tda()`), so they sit alongside the raw `.bin` data
-  and travel together whenever the capture is offloaded (e.g. `fetch_to_usb.sh`).
+  `.npy`, both per-frame timestamp sidecars (below), and `.mmwave.json` up
+  into `/mnt/ssd/<capture_dir>/` on the TDA (`utility.upload_files_to_tda()`),
+  so they sit alongside the raw `.bin` data and travel together whenever the
+  capture is offloaded (e.g. `fetch_to_usb.sh`).
 - `run_one_capture()` always resyncs the TDA's system clock to the host's over
   SSH before arming (`utility.sync_tda_clock()`) — the TDA is on an isolated
   subnet with no real time source, so its RTC free-runs from an arbitrary
@@ -88,8 +89,8 @@ python3 -c "import mmwcas; print('mmwcas OK')"
   to the IR sensor's host-clock timestamps** — verified empirically that
   field is a separate monotonic counter (microseconds since some
   boot/driver-init reference, nowhere near an epoch value), unaffected by
-  the OS date (an earlier version of this doc claimed otherwise). Use
-  `check_ir_timestamps.py`'s duration cross-check instead — see below.
+  the OS date (an earlier version of this doc claimed otherwise). See the
+  two per-frame timestamp sidecars below instead.
   The TDA's `date` is BusyBox v1.30.1, confirmed live via `date --help`
   (also confirmed by `%N` coming back as a literal, unexpanded string); the
   set step tries the two `-s TIME` forms BusyBox's own `--help` documents
@@ -98,15 +99,30 @@ python3 -c "import mmwcas; print('mmwcas OK')"
   seconds + one SSH round trip). No opt-out — every capture path
   (`mimo.py`, `mimo_interactive.py`) goes through `run_one_capture()`, so
   this always runs.
-- `check_ir_timestamps.py` sanity-checks a capture's IR marker regularity —
-  the rig spins at a constant rev/s, so marker-to-marker intervals should be
-  very uniform; it flags intervals >1.5x median (missed trigger) or <0.5x
-  median (debounce/double-trigger), reports measured vs `--expected-rps`,
-  and cross-checks the IR marker span's *duration* against the radar's own
-  frame timestamp span (not absolute time — see the caveat above). Supports
-  `--fetch <capture_dir>` to pull just the small sidecars (IR `.npy`,
-  `.mmwave.json`, `*_idx.bin`) from the TDA directly, same pattern as
-  `parse_idx.py --fetch`.
+- `run_one_capture()` also fetches that capture's `*_idx.bin` and exports two
+  per-frame timestamp sidecars (one entry per frame ACTUALLY captured, so
+  drops are reflected naturally):
+  - `rf_frame_timestamps/<capture_dir>_rf_frame_timestamps.npy` — the RF/DSP
+    side's own per-frame timestamp (`utility.fetch_rf_frame_timestamps()`),
+    TDA monotonic clock, **not** wall-clock.
+  - `rpi_frame_timestamps/<capture_dir>_rpi_frame_timestamps.npy` — this
+    host's estimate of when each of those same frames occurred, ON THIS
+    HOST'S OWN CLOCK (`utility.save_rpi_frame_timestamps()`), built by
+    anchoring the RF timestamps' relative spacing to `time.time()` at the
+    moment `mmw_start_frame()` returned. Directly comparable to the IR
+    sensor timestamps (also host clock) — the RF sidecar is not.
+- `check_timestamp.py` sanity-checks a capture's IR marker AND radar frame
+  regularity — the rig spins at a constant rev/s, so marker-to-marker (and
+  frame-to-frame) intervals should be very uniform; it flags intervals
+  >1.5x median (missed trigger / dropped frame) or <0.5x median
+  (debounce/double-trigger), reports measured vs `--expected-rps`, and
+  cross-checks the IR marker span's *duration* against the radar's own
+  frame timestamp span. It also reports the nearest-frame time difference
+  for every IR marker — an exact comparison against
+  `rpi_frame_timestamps.npy` when available, or an approximate one against
+  `rf_frame_timestamps.npy`/`idx.bin` otherwise (see the caveat above).
+  Supports `--fetch <capture_dir>` to pull just the small sidecars from the
+  TDA directly, same pattern as `parse_idx.py --fetch`.
 
 ---
 
