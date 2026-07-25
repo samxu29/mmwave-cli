@@ -5,20 +5,25 @@
 # skipping anything that already exists locally (safe to re-run).
 #
 # Usage:
-#   ./fetch_to_usb.sh /dev/sda1                              # copy ALL captures (sequential)
-#   ./fetch_to_usb.sh /dev/sda1 -p                            # copy ALL captures (parallel per-file, faster)
-#   ./fetch_to_usb.sh /dev/sda1 -c capture_1784577483         # copy ONE capture
+#   ./fetch_to_usb.sh /dev/sda1                              # prompts you to pick ONE dir from a list
+#   ./fetch_to_usb.sh /dev/sda1 -p                            # same, parallel per-file transfer
+#   ./fetch_to_usb.sh /dev/sda1 -c capture_1784577483         # copy ONE capture, no prompt
 #   ./fetch_to_usb.sh /dev/sda1 -c capture_1784577483 -p      # copy ONE capture, parallel
 #   ./fetch_to_usb.sh /dev/sda1 -c capture_1784577483 /mnt/ssd  # + custom remote base
 #
 #   $1        = USB device/partition (e.g. /dev/sda1) - check with `lsblk` first
-#   -c NAME   = optional: only fetch this one capture directory
+#   -c NAME   = optional: skip the interactive picker, fetch this exact capture directory
 #   -p        = optional: transfer files within each directory in parallel
 #               (confirmed ~2.6-3x faster on this board's slow single-connection
 #               scp - Dropbear/old SoC bottleneck is per-connection, not a hard
 #               aggregate cap). Off by default; original sequential scp -r is
 #               simpler and proven, so it stays the default.
 #   $2 (or last positional) = optional: remote base dir on TDA, default /mnt/ssd
+#
+# Without -c, the script always lists the directories under the remote base
+# and makes you pick exactly one - it never silently copies everything. After
+# a directory is copied, the remote and local file counts are compared and
+# the copy is rejected (partial copy removed) if they don't match.
 #
 set -euo pipefail
 
@@ -117,21 +122,50 @@ else
         ssh "${SSH_OPTS[@]}" "$TDA_HOST" \
             "find '$REMOTE_BASE' -mindepth 1 -maxdepth 1 -type d"
     )
-    REMOTE_DIRS=()
+    ALL_DIRS=()
     for p in "${REMOTE_PATHS[@]}"; do
-        REMOTE_DIRS+=("$(basename "$p")")
+        ALL_DIRS+=("$(basename "$p")")
     done
-    if [ "${#REMOTE_DIRS[@]}" -eq 0 ]; then
+    if [ "${#ALL_DIRS[@]}" -eq 0 ]; then
         echo "No capture directories found under $REMOTE_BASE. Nothing to do."
         sudo umount "$MOUNT_POINT"
         exit 0
     fi
-    echo "Found ${#REMOTE_DIRS[@]} directories on the TDA board."
+
+    echo ""
+    echo "Capture directories under $REMOTE_BASE on the TDA board:"
+    for i in "${!ALL_DIRS[@]}"; do
+        printf "  %2d) %s\n" "$((i + 1))" "${ALL_DIRS[$i]}"
+    done
+    echo ""
+    read -rp "Select a directory to fetch [1-${#ALL_DIRS[@]}]: " CHOICE
+
+    if ! [[ "$CHOICE" =~ ^[0-9]+$ ]] || [ "$CHOICE" -lt 1 ] || [ "$CHOICE" -gt "${#ALL_DIRS[@]}" ]; then
+        echo "ERROR: invalid selection '$CHOICE'." >&2
+        sudo umount "$MOUNT_POINT"
+        exit 1
+    fi
+
+    REMOTE_DIRS=("${ALL_DIRS[$((CHOICE - 1))]}")
 fi
+
+# --- verify a completed copy by comparing remote vs local file counts ---
+verify_copy() {
+    local dir="$1" dest="$2"
+    local remote_count local_count
+    remote_count=$(ssh "${SSH_OPTS[@]}" "$TDA_HOST" "find '$REMOTE_BASE/$dir' -type f | wc -l")
+    local_count=$(find "$dest" -type f | wc -l)
+    if [ "$remote_count" -ne "$local_count" ]; then
+        echo "    ERROR: file count mismatch for $dir (remote=$remote_count, local=$local_count)" >&2
+        return 1
+    fi
+    return 0
+}
 
 # --- copy each one, skipping anything already present locally ---
 COPIED=0
 SKIPPED=0
+FAILED=0
 for dir in "${REMOTE_DIRS[@]}"; do
     DEST="$OUTPUT_DIR/$dir"
     if [ -d "$DEST" ]; then
@@ -175,25 +209,27 @@ for dir in "${REMOTE_DIRS[@]}"; do
             fi
         done
 
-        if [ "$TRANSFER_OK" = true ]; then
+        if [ "$TRANSFER_OK" = true ] && verify_copy "$dir" "$DEST"; then
             COPIED=$((COPIED + 1))
         else
-            echo "    WARNING: one or more files in $dir failed to transfer - removing partial copy" >&2
+            echo "    WARNING: $dir failed to transfer completely - removing partial copy" >&2
             rm -rf "$DEST"
+            FAILED=$((FAILED + 1))
         fi
     else
         echo "==> COPY  $dir ..."
-        if scp -O -r "${SSH_OPTS[@]}" "$TDA_HOST:$REMOTE_BASE/$dir" "$OUTPUT_DIR/"; then
+        if scp -O -r "${SSH_OPTS[@]}" "$TDA_HOST:$REMOTE_BASE/$dir" "$OUTPUT_DIR/" && verify_copy "$dir" "$DEST"; then
             COPIED=$((COPIED + 1))
         else
-            echo "    WARNING: transfer of $dir failed or was incomplete - removing partial copy" >&2
+            echo "    WARNING: $dir failed to transfer completely - removing partial copy" >&2
             rm -rf "$DEST"
+            FAILED=$((FAILED + 1))
         fi
     fi
 done
 
 echo ""
-echo "==> Summary: copied $COPIED, skipped $SKIPPED (already present)"
+echo "==> Summary: copied $COPIED, skipped $SKIPPED (already present), failed $FAILED"
 
 echo "==> Syncing filesystem buffers to disk before unmount ..."
 sync
