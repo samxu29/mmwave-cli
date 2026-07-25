@@ -22,3 +22,5 @@ experiment-log/*
 logs/*
 /PostProc/*
 *.mmwave.json
+
+*_idx.bin
