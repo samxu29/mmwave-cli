@@ -1,5 +1,146 @@
+import os
 import subprocess
+import sys
 import time
+
+
+class TeeLogger:
+    """Mirror everything the process prints into a log file, live.
+
+    Two design constraints, both learned the hard way:
+
+    1. Redirect at the FILE DESCRIPTOR level, not by replacing sys.stdout. A
+       large part of a capture's output - every "STATUS 0 | DEV MAP ..." line,
+       the chirp config dump, the TDA arm/framing messages - is printf() from
+       the compiled mmwcas extension and never passes through Python's stdout
+       object, so a sys.stdout wrapper silently loses exactly the lines that say
+       whether the radar configured correctly.
+
+    2. Something OTHER THAN A PYTHON THREAD has to move the bytes. The first
+       version used a reader thread and killed live output completely: mmwcas's
+       cpdef entry points call into C without releasing the GIL, so during
+       mmw_set_config()/mmw_init() - tens of seconds, and where nearly all the
+       STATUS lines come from - no Python thread can run, and the terminal sat
+       silent until the call returned. Measured with a GIL-holding ctypes call:
+       a C line emitted at t+0.00 did not appear until t+3.00. It also risked a
+       hard deadlock, since a C write that fills the pty buffer while the GIL is
+       held can never be drained. An external `tee` process is immune: the
+       kernel and tee move the data with no reference to our interpreter.
+
+    So: fd 1/2 point at a pty slave, and `tee` runs with the pty master as its
+    stdin and the real terminal as its stdout. The pty (rather than a plain
+    pipe) matters because behind a pipe the C library switches from line to 4 KB
+    block buffering, which would batch the C output into bursts; a pty looks
+    like a terminal to it, so line buffering and live output are preserved.
+    ONLCR is cleared on the slave so the log gets plain \\n, not \\r\\n.
+    """
+
+    def __init__(self, path):
+        self.path = path
+        self._proc = None
+        self._saved_out = None
+        self._saved_err = None
+        self._devnull = None
+
+    def start(self):
+        import pty
+        import termios
+
+        os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
+        master, slave = pty.openpty()
+        try:
+            attrs = termios.tcgetattr(slave)
+            attrs[1] &= ~termios.ONLCR          # oflag: no \n -> \r\n
+            attrs[3] &= ~termios.ECHO           # lflag: nothing echoes back
+            termios.tcsetattr(slave, termios.TCSANOW, attrs)
+        except termios.error:
+            pass                                 # cosmetic only, keep going
+
+        sys.stdout.flush()
+        sys.stderr.flush()
+        self._saved_out = os.dup(1)
+        self._saved_err = os.dup(2)
+
+        # tee's stderr goes to /dev/null on purpose: tearing the pty down at
+        # stop() makes its read() fail with EIO, and GNU tee reports that as
+        # "read error" on the terminal even though the log is complete.
+        self._devnull = os.open(os.devnull, os.O_WRONLY)
+        try:
+            self._proc = subprocess.Popen(
+                ["tee", self.path],
+                stdin=master, stdout=self._saved_out, stderr=self._devnull)
+        except (OSError, ValueError):
+            os.close(master)
+            os.close(slave)
+            os.close(self._devnull)
+            os.close(self._saved_out)
+            os.close(self._saved_err)
+            self._saved_out = self._saved_err = self._devnull = None
+            raise
+        os.close(master)                         # tee owns it now
+
+        os.dup2(slave, 1)
+        os.dup2(slave, 2)
+        os.close(slave)
+
+        # Python's own buffering mode was fixed at interpreter startup from the
+        # ORIGINAL stdout, so under `nohup`/`> file` it is block-buffered while
+        # the C side stays line-buffered through the pty. The two streams then
+        # interleave wrongly and the log reads out of order. Force line
+        # buffering so both sides land in the file in the order they happened.
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                stream.reconfigure(line_buffering=True)
+            except (AttributeError, ValueError, OSError):
+                pass
+        return self
+
+    def rename(self, new_path):
+        """Move the log to its final name mid-run.
+
+        The capture directory name (with its timestamp) only exists once the
+        capture starts, but logging has to be running before that to catch the
+        configuration output. So the log opens under a provisional name and is
+        renamed here; tee holds an open handle, so the rename follows the data
+        and nothing is lost.
+        """
+        if self._proc is None:
+            return self.path
+        os.makedirs(os.path.dirname(new_path) or ".", exist_ok=True)
+        try:
+            os.replace(self.path, new_path)
+            self.path = new_path
+        except OSError:
+            pass
+        return self.path
+
+    def stop(self):
+        """Restore the real stdout/stderr and let tee finish writing the log."""
+        if self._saved_out is None:
+            return self.path
+        sys.stdout.flush()
+        sys.stderr.flush()
+
+        # Restoring fd 1/2 drops the last descriptors on the pty slave, which is
+        # what tells tee its input is finished. Waiting for tee to exit is what
+        # guarantees the log on disk is complete before anyone uploads it.
+        os.dup2(self._saved_out, 1)
+        os.dup2(self._saved_err, 2)
+        os.close(self._saved_out)
+        os.close(self._saved_err)
+        self._saved_out = self._saved_err = None
+        try:
+            self._proc.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            self._proc.kill()
+            self._proc.wait(timeout=2.0)
+        if self._devnull is not None:
+            try:
+                os.close(self._devnull)
+            except OSError:
+                pass
+            self._devnull = None
+        return self.path
 
 
 def _ls_capture_dir(remote_path, tda_ip):
@@ -131,6 +272,133 @@ def check_captured_files(capture_dir, tda_ip="192.168.33.180", retries=4, retry_
     except Exception as e:
         print(f"\n ERROR: Failed to check files via SSH: {e}")
         return False, 0, []
+
+
+def read_tda_thermal(tda_ip="192.168.33.180", timeout=15):
+    """
+    Read the TDA2 SoC thermal zones over SSH. Returns {zone_type: degC} or {}.
+
+    Complements the RF chips' on-die sensors (mmwcas.mmw_get_temperature): those
+    only cover the AWR2243 dies, but captured frames go missing from the TDA's
+    own index while the RF frame grid stays perfect, so the TDA is at least as
+    likely a place for a thermal stall. Measured 70.2 degC on cpu_thermal with
+    the board IDLE, which is warm enough to be worth tracking across a capture.
+
+    Zones seen on this board: cpu_thermal, gpu_thermal, core_thermal,
+    dspeve_thermal, iva_thermal (sysfs reports millidegrees).
+
+    Never raises - thermal data is diagnostic, so a failed read just yields {}.
+    """
+    remote = ('for z in /sys/class/thermal/thermal_zone*; do '
+              'echo "$(cat $z/type 2>/dev/null) $(cat $z/temp 2>/dev/null)"; done')
+    ssh_cmd = [
+        "ssh",
+        "-oHostKeyAlgorithms=+ssh-rsa",
+        "-oPubkeyAcceptedAlgorithms=+ssh-rsa",
+        "-oStrictHostKeyChecking=no",
+        "-oConnectTimeout=10",
+        f"root@{tda_ip}",
+        remote,
+    ]
+    try:
+        res = subprocess.run(ssh_cmd, capture_output=True, text=True,
+                             timeout=timeout)
+        if res.returncode != 0:
+            return {}
+        zones = {}
+        for line in res.stdout.strip().splitlines():
+            parts = line.split()
+            if len(parts) != 2:
+                continue
+            name, raw = parts
+            try:
+                milli = int(raw)
+            except ValueError:
+                continue
+            zones[name.replace("_thermal", "")] = milli / 1000.0
+        return zones
+    except Exception:
+        return {}
+
+
+def truncate_capture_padding(targets, capture_dir, tda_ip="192.168.33.180"):
+    """
+    Shrink pre-allocated capture files on the TDA down to their real payload.
+
+    Arming the TDA with numberOfFilesToAllocate > 0 is what stops it dropping
+    frames (it no longer has to extend the file while frames stream in), but TI
+    fixes each pre-allocated file at 2047 MB regardless of how many frames were
+    actually recorded - so a 300-frame capture writes ~940 MB of data inside a
+    2.0 GiB file. Left alone that doubles what pipeline.py has to SCP.
+
+    Truncating is safe because the frames are written contiguously from offset 0
+    with a constant stride (verified via parse_idx.py: "payload extent: offset 0
+    .. N [contiguous from 0]", and the idx header's own dataFileSize agrees with
+    frames x bytes-per-frame exactly). Everything past the payload is untouched
+    pre-allocation, not data.
+
+    targets: {remote_filename: payload_bytes}. Entries are SKIPPED unless the
+    file is currently LARGER than payload_bytes, so this can only ever remove
+    padding - it will never truncate into real frames, and re-running is a
+    no-op. busybox `truncate` is used when present, with a `dd conv=trunc`
+    fallback for TDA images that lack it.
+
+    Returns True if the remote command ran, False otherwise (never raises - a
+    failed reclaim must not fail an otherwise good capture).
+    """
+    if not targets:
+        return False
+
+    cmds = []
+    for name, size in sorted(targets.items()):
+        base = str(name).split("/")[-1]
+        path = f"/mnt/ssd/{capture_dir}/{base}"
+        size = int(size)
+        if size <= 0:
+            continue
+        # Only shrink: compare against the live size on the TDA itself, so a
+        # stale/incorrect target can't eat data.
+        # stat reads the size from the inode. Do NOT use `wc -c` here: busybox
+        # wc streams the whole file to count bytes, so guarding a 2 GiB
+        # pre-allocated file that way reads 2 GiB off the SSD per device and
+        # times the reclaim out before it truncates anything.
+        cmds.append(
+            f'cur=$(stat -c %s "{path}" 2>/dev/null || echo 0); '
+            f'if [ "$cur" -gt {size} ]; then '
+            f'truncate -s {size} "{path}" 2>/dev/null || '
+            f'dd if=/dev/null of="{path}" bs=1 seek={size} conv=trunc 2>/dev/null; '
+            f'echo "  {base}: $cur -> $(stat -c %s "{path}" 2>/dev/null)"; '
+            f'else echo "  {base}: left as-is (size $cur)"; fi'
+        )
+    if not cmds:
+        return False
+
+    ssh_cmd = [
+        "ssh",
+        "-oHostKeyAlgorithms=+ssh-rsa",
+        "-oPubkeyAcceptedAlgorithms=+ssh-rsa",
+        "-oStrictHostKeyChecking=no",
+        "-oConnectTimeout=10",
+        f"root@{tda_ip}",
+        "; ".join(cmds),
+    ]
+    try:
+        result = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=60)
+        if result.returncode != 0:
+            print(f"\n WARNING: Failed to reclaim pre-allocation padding: "
+                  f"{result.stderr.strip()}")
+            return False
+        out = result.stdout.strip()
+        if out:
+            print(f"\n Reclaimed pre-allocation padding on the TDA:")
+            print(out)
+        return True
+    except subprocess.TimeoutExpired:
+        print(f"\n WARNING: Padding reclaim timed out.")
+        return False
+    except Exception as e:
+        print(f"\n WARNING: Failed to reclaim pre-allocation padding: {e}")
+        return False
 
 
 def upload_files_to_tda(local_paths, capture_dir, tda_ip="192.168.33.180"):
@@ -362,6 +630,11 @@ def export_config_to_json(config_dict, filename, num_devices=4):
                 "rlDynPerChirpPhShftCfgs": []
             },
             "rawDataCaptureConfig": {
+                # How the TDA wrote the samples: 0 = 16-bit as-is, 1 = 4 LSBs
+                # dropped and packed as 12-bit (read with '*ubit12', not
+                # 'uint16'). Recorded per capture so downstream processing can
+                # tell without being told out of band.
+                "dataPacking": int(datapath.get("dataPacking", 0)),
                 "rlDevDataFmtCfg_t": {
                     "iqSwapSel": datapath["iqSwapSel"],
                     "chInterleave": datapath["chInterleave"]

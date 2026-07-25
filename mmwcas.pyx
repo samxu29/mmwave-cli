@@ -128,6 +128,23 @@ cdef extern from "ti/mmwave/mmwave.h":
         unsigned int dataPacking
         unsigned int numberOfFramesToCapture
 
+    # On-die temperature sensors (rl_sensor.h). All readings are signed degC,
+    # 1 LSB = 1 degC; `time` is radarSS time since power-up, 1 LSB = 1 ms.
+    ctypedef struct rlRfTempData_t:
+        uint32_t time
+        int16_t tmpRx0Sens
+        int16_t tmpRx1Sens
+        int16_t tmpRx2Sens
+        int16_t tmpRx3Sens
+        int16_t tmpTx0Sens
+        int16_t tmpTx1Sens
+        int16_t tmpTx2Sens
+        int16_t tmpPmSens
+        int16_t tmpDig0Sens
+        int16_t tmpDig1Sens
+
+    int rlRfGetTemperatureReport(uint8_t deviceMap, rlRfTempData_t* data)
+
     int MMWL_chirpConfig(unsigned char deviceMap, rlChirpCfg_t chirpCfgArgs)
     unsigned int createDevMapFromDevId(unsigned char devId)
     int MMWL_DevicePowerUp(unsigned char deviceMap, uint32_t rlClientCbsTimeout, uint32_t sopTimeout)
@@ -940,12 +957,37 @@ cpdef int mmw_reconfigure_frame_count(int num_frames):
 
     return status
 
-cpdef int mmw_arming_tda(str capture_path, int num_frames=-1):
+cpdef int mmw_arming_tda(str capture_path, int num_frames=-1, int num_files=0,
+                         int data_packing=0):
     """@brief Prepare the TDA board and notify TDA about the start of recording
     * @capture_path capture path setup to arm the TDA for recording
     * @num_frames frames for TDA to record (-1 = use config.frameCfg.numFrames;
     *             0 = unlimited until stop). Used by interactive mode so each
     *             capture can request a different length without reconfiguring RF.
+    * @num_files  files to PRE-ALLOCATE on the TDA SSD before recording starts
+    *             (numberOfFilesToAllocate). 0 = don't pre-allocate, which means
+    *             the TDA extends the capture file on the fly as frames stream
+    *             in; that filesystem work sits on the write path and shows up
+    *             as random single dropped frames. TI's own Cascade_Capture.lua
+    *             says of this field: "the number of files to preallocate on the
+    *             SSD. This improves capture reliability by not having frame
+    *             drops while switching files. The tradeoff is that each file is
+    *             a fixed 2047 MB even if a smaller number of frames are
+    *             captured." So a non-zero value trades disk space for
+    *             reliability - mimo.py sizes it from the capture (see
+    *             _tda_prealloc_files there / --tda-prealloc-files).
+    *             Kept at 0 by default so this signature stays backwards
+    *             compatible with callers that don't pass it.
+    * @data_packing 0 = store ADC samples as-is at 16 bit; 1 = drop the 4 LSBs
+    *             and pack four 12-bit samples into 6 bytes, cutting the write
+    *             rate to 75%. TI's Cascade_Capture.lua: "select whether to use
+    *             16-bit ADC data as is, or drop 4 lsbits and save 4*12-bit
+    *             numbers in a packed form. This allows a higher frame rate to
+    *             be achieved, at the expense of some post-processing to unpack
+    *             the data later." The TDA does the packing - no RF/datapath
+    *             reconfiguration is involved. NOTE: downstream readers must
+    *             unpack ('*ubit12' rather than 'uint16'); mimo.py records the
+    *             mode in the .mmwave.json sidecar so they can tell.
     * @return int
     """
     cdef int status = 0
@@ -962,12 +1004,12 @@ cpdef int mmw_arming_tda(str capture_path, int num_frames=-1):
     cdef rlTdaArmCfg_t tdaCfg
     tdaCfg.captureDirectory = <unsigned char*>capture_path_buf
     tdaCfg.framePeriodicity = frame_period_ms
-    tdaCfg.numberOfFilesToAllocate = 0
+    tdaCfg.numberOfFilesToAllocate = <unsigned int>num_files
     if num_frames < 0:
         tdaCfg.numberOfFramesToCapture = config.frameCfg.numFrames
     else:
         tdaCfg.numberOfFramesToCapture = <unsigned int>num_frames
-    tdaCfg.dataPacking = 0              # 0: 16-bit | 1: 12-bit
+    tdaCfg.dataPacking = <unsigned int>data_packing   # 0: 16-bit | 1: 12-bit
 
     status = MMWL_ArmingTDA(tdaCfg)
     check(status,
@@ -1042,6 +1084,55 @@ cpdef int mmw_stop_frame():
         config.deviceMap, 
         0)
     return status
+
+cpdef dict mmw_get_temperature():
+    """@brief Read the on-die temperature sensors of every active device.
+    *
+    * Frame losses on this rig appear partway into a capture and start EARLIER on
+    * each successive run (never / 19.3 s / 12.7 s across three back-to-back
+    * 300-frame captures), which is what a thermal limit looks like: each run
+    * begins hotter, so the threshold arrives sooner. This exposes the actual die
+    * temperatures so that can be confirmed rather than inferred - sample it
+    * before and after a capture and watch both the starting value and the rise.
+    *
+    * Reads RL_RF_TEMPERATURE via rlRfGetTemperatureReport() per device. Cheap
+    * and read-only, but it is still an RPC to the RF chip: call it AROUND a
+    * capture, not during framing, where the 98%-duty schedule leaves ~2 ms of
+    * idle per frame to service it.
+    *
+    * @return dict {dev_id: {"time_ms", "rx0".."rx3", "tx0".."tx2", "pm",
+    *         "dig0", "dig1", "max"}}, max being the hottest sensor on that
+    *         device. Devices that fail to answer are omitted, so a failed read
+    *         degrades to less data rather than an exception.
+    """
+    cdef rlRfTempData_t data
+    cdef int status
+    cdef int i
+    out = {}
+    for i in range(4):
+        if not (_device_map & (1 << i)):
+            continue
+        status = rlRfGetTemperatureReport(<uint8_t>(1 << i), &data)
+        if status != 0:
+            printf(b"[MMWCAS-RF] temperature read failed on device %d\n", i)
+            continue
+        sensors = {
+            "rx0": data.tmpRx0Sens, "rx1": data.tmpRx1Sens,
+            "rx2": data.tmpRx2Sens, "rx3": data.tmpRx3Sens,
+            "tx0": data.tmpTx0Sens, "tx1": data.tmpTx1Sens,
+            "tx2": data.tmpTx2Sens, "pm": data.tmpPmSens,
+            "dig0": data.tmpDig0Sens, "dig1": data.tmpDig1Sens,
+        }
+        sensors["time_ms"] = data.time
+        # Plain list, not a generator expression: Cython does not support
+        # closures inside cpdef functions, and a genexpr argument creates one.
+        # dig1 is excluded - it reads 0 on AWR2243 (xWR1642/6843/1843 only).
+        hot = [data.tmpRx0Sens, data.tmpRx1Sens, data.tmpRx2Sens,
+               data.tmpRx3Sens, data.tmpTx0Sens, data.tmpTx1Sens,
+               data.tmpTx2Sens, data.tmpPmSens, data.tmpDig0Sens]
+        sensors["max"] = max(hot)
+        out[i] = sensors
+    return out
 
 cpdef int mmw_dearming_tda():
     cdef int status = 0

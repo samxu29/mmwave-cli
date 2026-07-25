@@ -7,6 +7,73 @@ frame timing) has moved OUT of this file and into radar_config.py
 idle-time scheme or antenna geometry preset without editing this file. Select
 a non-default preset with --radar-config <name>.
 
+FRAME DROPS (investigated 2026-07-24, bug/capture-frame-drop - READ THIS BEFORE
+RE-INVESTIGATING). frame_sweep.py swept capture length 25..600 frames in
+randomised order and showed the shortfall is TWO SEPARATE mechanisms, which is
+why single-length measurements looked so noisy:
+
+  (A) A flat ~2 frames lost at EVERY length, with zero internal gaps in the
+      index - i.e. tail/edge truncation, not mid-capture loss. Independent of N,
+      so it is 6% of a 25-frame capture and 0.3% of a 600-frame one. This is the
+      whole story for short captures. TDA_ARM_FRAME_HEADROOM does not fix it.
+
+  (B) A handful of internal mid-capture gaps, single frames absent from an
+      otherwise perfect grid (each gap exactly 2.00 periods, survivors at median
+      100.01 ms) at IDENTICAL indices on master and slave - so a shared cause
+      upstream of the per-device links. Typically 1-5% of frames, with large
+      run-to-run scatter. Position within the capture is NOT fixed: clean runs
+      have started dropping only after ~30 s, but a probed 600-frame run lost
+      its first frame at t+0.8 s and kept dropping throughout - so "late onset"
+      is a common pattern, not a law.
+
+HOW (B) IS NOT CAUSED - settled by direct observation (tda_probe.py,
+probe_run_260724_211910, 567/600 frames, 28 internal gaps):
+  * Page cache / dirty_expire. Dirty and Writeback stayed 0.0 MB for the entire
+    capture while the SSD wrote a steady ~55-66 MB/s. The capture path bypasses
+    the page cache (O_DIRECT or equivalent). vm.dirty_expire_centisecs = 3000
+    matching the ~30 s onset on some runs was a coincidence; tuning vm.dirty_*
+    cannot help.
+  * SSD saturation. Disk busy was 10-22% during the gap phase, never pegged,
+    and write MB/s did not collapse when frames were lost.
+  * Write rate / bandwidth. 600 frames at 100 ms (62.7 MB/s) vs 200 ms
+    (31.3 MB/s) lost a similar number of internal frames.
+  * RF frame overrun / duty cycle, SSD capacity, temperature, host wait,
+    session drift - see earlier experiments.
+
+PRIME SUSPECT now is our CLI / Ethernet arming path, NOT the TDA hardware or
+the RF config. Studio A/B at the same cascade_tx3_rx8 geometry and 600 frames
+(lua_reference/Cascade_Configuration_Capture_cascade_tx3_rx8_600.lua,
+studio_tx3_rx8_600_20260724_212505):
+  * Studio: 599/600, ZERO internal gaps, perfect 100.01 ms median grid, only a
+    clean 1-frame tail shortfall (= mechanism A).
+  * CLI:    routinely 5-33 internal mid-capture gaps on the same length.
+So the RF schedule, SSD, and TDA capture firmware can deliver a clean 60 s
+capture when Studio drives them. Mechanism (B) is introduced by how we
+configure/arm/stop from mmwcas on the Pi. Remaining bisect targets: TDA
+numberOfFramesToCapture (Studio passes 0 = follow FrameConfig; we pass N+50),
+post-arm settle, CreateApp / ConnectTDA sequencing, RfInitCalibConfig, and
+stop/de-arm behaviour.
+
+WHAT HELPED, MODESTLY: arming with numberOfFilesToAllocate > 0 so the TDA is not
+extending the capture file while frames stream in. Pooled means over identical
+300-frame runs - OFF 286.5 (280/284/290/292), ON 291.8 (286/290/291/293/299): ~5
+frames better and a higher floor, but well inside run-to-run scatter, so treat it
+as an improvement rather than a fix. _tda_prealloc_files() sizes it;
+--tda-prealloc-files 0 restores the old behaviour for A/B testing. Because TI
+fixes each pre-allocated file at 2047 MB regardless of frames recorded, the
+padding is trimmed back to the real payload afterwards (--no-reclaim-padding to
+keep it).
+
+CONSEQUENCE FOR DOWNSTREAM - the important part. Frame counts come from
+<dev>_0000_idx.bin (24-byte header + 48 bytes/frame), never from the data file
+size, which pre-allocation inflates. That index also stores a TIMESTAMP per
+frame, and processing MUST place frames by those timestamps: treating N captured
+frames as N contiguous samples at dt scales every derived frequency by the drop
+fraction (at 283/300 that is a 5.5% bias, ~0.11 Hz on a 2 Hz mode - larger than
+the 0.067 Hz frequency resolution, and it varies per capture). Displacement is
+far less affected, since a 200 ms gap needs >lambda/4 ~ 0.97 mm of motion to
+break phase unwrapping. Use parse_idx.py to inspect any capture.
+
 Capture length is defined by FRAME COUNT (--frames), not wall-clock seconds.
 The radar + TDA are programmed with that numFrames so they stop after exactly
 N frames (e.g. 300 frames @ 100 ms period ≈ 30 s). Host sleep is only
@@ -50,6 +117,9 @@ from utility import export_config_to_json
 from utility import check_captured_files
 from utility import signal_handler
 from utility import upload_files_to_tda
+from utility import truncate_capture_padding
+from utility import read_tda_thermal
+from utility import TeeLogger
 from radar_config import RADAR_CONFIGS, DEFAULT_RADAR_CONFIG, get_radar_config
 import os
 
@@ -59,9 +129,43 @@ def _frame_period_s(cfg):
     return float(cfg["mimo"]["frame"]["framePeriodicity"]) / 1000.0
 
 
+# Extra frames to arm the TDA with, on top of the N we actually want.
+#
+# The TDA's recording window is bounded by the numberOfFramesToCapture we arm
+# it with, and that window opens at ARM time - not when the master emits its
+# first frame, which is ~2.1 s later (post-arm settle plus the slaves-then-
+# master sequencing in mmw_start_frame()). A TDA armed for exactly N can
+# therefore close while the radar is still emitting the tail.
+#
+# SCOPE: this only fixes the small TAIL deficit, which parse_idx.py measured at
+# ~2 frames of a 20-frame shortfall. It is NOT the main frame-drop cause - the
+# other ~18 were mid-capture skips (see the note in _warn_on_frame_drops).
+# Cheap insurance, not a cure; do not read a clean 300 here as proof the drop
+# bug is solved without checking parse_idx.py for internal gaps.
+#
+# Arming with headroom costs nothing: the RF chips are still programmed with
+# frame.numFrames = N and self-stop after exactly N frames, so the extra
+# allowance is never filled - it only stops the TDA closing the window early.
+# The host wait below still bounds the session, and mmw_dearming_tda() ends
+# recording either way.
+TDA_ARM_FRAME_HEADROOM = 50
+
+
 def _wait_s_for_frames(num_frames, period_s):
-    """Host wait after start_frame: N periods + one period margin for TDA flush."""
-    return num_frames * period_s + period_s
+    """Host wait after start_frame before de-arming the TDA.
+
+    = N periods (the actual framing time) + a startup/flush margin.
+
+    The margin covers the latency between start_frame() returning and the
+    master ACTUALLY emitting its first frame (slave-arm sleep, RPC round-trips,
+    first-frame calibration, PLL settle) PLUS TDA flush at the end. Necessary
+    but NOT sufficient on its own: raising it from one period to 5 s did not
+    recover any frames, because the binding constraint is the TDA's own
+    arm-time window, not this sleep - see TDA_ARM_FRAME_HEADROOM above. Keep
+    it generous anyway so de-arm never cuts off a still-running radar; the
+    radar auto-stops at numFrames so waiting extra is harmless (stop_frame()
+    then just reports frame-already-ended)."""
+    return num_frames * period_s + period_s + 5.0
 
 
 def _rx_popcount_per_device(cfg):
@@ -74,15 +178,26 @@ def _rx_popcount_per_device(cfg):
     return [n, n, n, n]
 
 
+def _data_packing(cfg):
+    """TDA dataPacking mode for this capture: 0 = 16-bit, 1 = packed 12-bit.
+    Read from mimo.datapath.dataPacking, which mimo.py sets from
+    --data-packing; absent means 16-bit."""
+    try:
+        return 1 if int(cfg["mimo"]["datapath"].get("dataPacking", 0)) == 1 else 0
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return 0
+
+
 def _expected_bytes_per_frame_for_device(cfg, dev_id):
     """
-    On-disk bytes for ONE frame in a single device's <dev>_0000_data.bin, for
-    16-bit complex ADC (the only layout this tool writes - TDA dataPacking is
-    hard-coded 0 = 16-bit in mmw_arming_tda()).
+    On-disk bytes for ONE frame in a single device's <dev>_0000_data.bin.
 
-        bytes/frame/device =
-            numAdcSamples × chirpsPerLoop × numLoops × numRxOnThisDevice
-            × 2 (I+Q) × 2 (bytes per 16-bit sample)
+        real samples/frame/device =
+            numAdcSamples × chirpsPerLoop × numLoops × numRxOnThisDevice × 2 (I+Q)
+
+    times bytes per sample, which depends on the TDA packing mode: 2 bytes at
+    16-bit (dataPacking 0), or 1.5 bytes at packed 12-bit (dataPacking 1, four
+    samples per 6 bytes) - computed as samples*3//2 to stay exact.
 
     chirpsPerLoop = chirpEndIdx - chirpStartIdx + 1. numRxOnThisDevice is the
     popcount of that device's rxChannelEn (supports per-device lists). Returns
@@ -100,7 +215,10 @@ def _expected_bytes_per_frame_for_device(cfg, dev_id):
             return None
         if num_rx <= 0:
             return 0
-        return num_adc * chirps_per_loop * num_loops * num_rx * 2 * 2
+        samples = num_adc * chirps_per_loop * num_loops * num_rx * 2
+        if _data_packing(cfg) == 1:
+            return samples * 3 // 2
+        return samples * 2
     except (KeyError, TypeError, ValueError, IndexError):
         return None
 
@@ -129,6 +247,124 @@ def _frame_active_time_us(cfg):
         return None
 
 
+# Each file the TDA pre-allocates is a fixed 2047 MB (TI's Cascade_Capture.lua).
+TDA_PREALLOC_FILE_BYTES = 2047 * 1024 * 1024
+
+# Sustained sequential write the TDA's NVMe actually delivers, MB/s (10^6 B).
+# Measured 2026-07-24 by writing 3 GB in 500 MB chunks with a sync after each:
+# 92.1, 101.5, 93.2, 95.7, 91.7, 91.6 MB/s - flat, so no SLC-cache exhaustion or
+# thermal throttling, just a modest ceiling. Far below what "NVMe" implies, and
+# low enough that a capture's aggregate write rate has to be checked against it.
+TDA_SSD_WRITE_MBPS = 92.0
+
+# Fraction of TDA_SSD_WRITE_MBPS above which a capture is considered to have too
+# little headroom to absorb a stall without losing frames.
+TDA_SSD_WRITE_WARN_FRACTION = 0.7
+
+# Shortfall (frames) reported as a one-line note rather than the full diagnosis.
+# Deliberately small: this rig's baseline loss is ~3-5% (see FRAME DROPS above),
+# so most captures DO print the long form. That is intended - the shortfall is
+# real, it is not yet fixed, and downstream has to know the frames are missing.
+# Raising this would only hide it.
+FRAME_SHORTFALL_NOISE_FLOOR = 2
+
+# Bytes of the TDA's <dev>_0000_idx.bin: a 24-byte file header followed by one
+# 48-byte entry per frame the TDA ACTUALLY captured. That entry count is the
+# authoritative frame count - unlike the data file it can't be inflated by
+# pre-allocation padding. See parse_idx.py for the full struct layout.
+_IDX_HEADER_BYTES = 24
+_IDX_ENTRY_BYTES = 48
+
+
+def _tda_prealloc_files(cfg, num_frames):
+    """How many files to have the TDA pre-allocate for this capture.
+
+    Zero pre-allocation (the previous hard-coded behaviour) makes the TDA grow
+    the capture file as frames stream in, and that filesystem extension work
+    lands on the write path - the measured result was random single frames
+    vanishing from an otherwise perfect frame grid, identically on every
+    device, at a rate independent of data rate (so neither a bandwidth ceiling
+    nor RF scheduling). TI documents this field as the fix in
+    Cascade_Capture.lua: "the number of files to preallocate on the SSD. This
+    improves capture reliability by not having frame drops while switching
+    files. The tradeoff is that each file is a fixed 2047 MB even if a smaller
+    number of frames are captured."
+
+    Sized off the LARGEST per-device stream (each device writes its own file),
+    rounded up, floor of 1. Returns 1 if the per-frame size is unknown.
+    """
+    per_dev = [_expected_bytes_per_frame_for_device(cfg, d) for d in range(4)]
+    bpf = max((b for b in per_dev if b), default=None)
+    if not bpf:
+        return 1
+    total = bpf * max(int(num_frames), 1)
+    return max(1, -(-total // TDA_PREALLOC_FILE_BYTES))   # ceil division
+
+
+def _required_write_rate_mbps(cfg):
+    """Aggregate MB/s (10^6 B) the TDA must write to keep up with this preset.
+
+    Summed across all RX-enabled devices, since they all land on the same SSD:
+        sum(bytes/frame/device) / framePeriodicity
+    Returns None if the per-frame size or frame period can't be derived.
+    """
+    try:
+        period_s = float(cfg["mimo"]["frame"]["framePeriodicity"]) / 1000.0
+    except (KeyError, TypeError, ValueError):
+        return None
+    if period_s <= 0:
+        return None
+    total = 0
+    for dev in range(4):
+        bpf = _expected_bytes_per_frame_for_device(cfg, dev)
+        if bpf:
+            total += bpf
+    if not total:
+        return None
+    return total / period_s / 1e6
+
+
+def _report_write_budget(cfg):
+    """Print the capture's write rate against what the TDA SSD can sustain.
+
+    Worth checking before every capture: at ~92 MB/s measured, a 4-device 16-bit
+    preset at 10 fps needs ~126 MB/s, which is arithmetically impossible to
+    sustain (short captures survive only while TDA DDR absorbs the deficit).
+
+    Staying under budget is necessary but NOT sufficient - cascade_tx3_rx8 sits
+    at 68% and still drops ~3-5%, and cutting it to 47 MB/s with 12-bit packing
+    made the loss worse. So read a green figure here as "bandwidth is not your
+    problem", never as "this capture will be complete". Returns the rate or None.
+    """
+    req = _required_write_rate_mbps(cfg)
+    if req is None:
+        return None
+    pct = req / TDA_SSD_WRITE_MBPS * 100.0
+    packing = "12-bit packed" if _data_packing(cfg) == 1 else "16-bit"
+    print(f"TDA write budget : {req:.1f} MB/s needed, "
+          f"{TDA_SSD_WRITE_MBPS:.0f} MB/s measured ({pct:.0f}%)  [{packing}]")
+    if req > TDA_SSD_WRITE_MBPS:
+        print(f"  ** OVER BUDGET: the SSD cannot keep up. Expect heavy frame "
+              f"loss on longer captures")
+        print(f"     (short ones survive only while TDA DDR absorbs the "
+              f"deficit). Reduce numLoops /")
+        print(f"     RX count / numAdcSamples, or raise framePeriodicity.")
+    elif req > TDA_SSD_WRITE_MBPS * TDA_SSD_WRITE_WARN_FRACTION:
+        print(f"  NOTE: little headroom - a brief SSD stall can't be absorbed, "
+              f"so occasional")
+        print(f"  single-frame losses are likely. Check with parse_idx.py.")
+    return req
+
+
+def _frames_from_idx_size(size):
+    """Frames the TDA indexed, from an <dev>_0000_idx.bin byte size.
+    Returns None if the size can't hold a header + at least one entry."""
+    body = int(size) - _IDX_HEADER_BYTES
+    if body < _IDX_ENTRY_BYTES:
+        return None
+    return body // _IDX_ENTRY_BYTES
+
+
 def _dev_id_from_data_bin(name):
     """Parse leading device index from e.g. 'master_0000_data.bin' /
     'slave1_0000_data.bin' / '0_0000_data.bin'. Returns None if unknown."""
@@ -148,19 +384,119 @@ def _dev_id_from_data_bin(name):
     return None
 
 
+def _read_tda_temps(label, tda_ip):
+    """Print the TDA2 SoC thermal zones, return them. Read OUTSIDE the armed
+    window (before arming / after de-arming) so the SSH login can't add load
+    while the TDA is capturing."""
+    zones = read_tda_thermal(tda_ip)
+    if not zones:
+        return None
+    hottest = max(zones.values())
+    detail = "  ".join(f"{k} {v:.1f}" for k, v in sorted(zones.items()))
+    print(f"    [TDA TEMP] {label:5s} max {hottest:.1f}C   ({detail})")
+    return zones
+
+
+def _read_temps(label):
+    """Print on-die temperatures for every active device, return the reading.
+
+    Sampled around a capture (never during framing) to test the thermal
+    explanation for mid-capture frame loss: drops begin partway in and start
+    earlier on each successive run, consistent with each run beginning hotter.
+    Tolerates an mmwcas built before mmw_get_temperature() existed.
+    """
+    getter = getattr(mmwcas, "mmw_get_temperature", None)
+    if getter is None:
+        return None
+    try:
+        temps = getter()
+    except Exception as e:
+        print(f"    [TEMP] read failed ({e})")
+        return None
+    if not temps:
+        return None
+    for dev, s in sorted(temps.items()):
+        print(f"    [TEMP] {label:5s} dev{dev}: max {s['max']:3d}C  "
+              f"(rx {s['rx0']},{s['rx1']},{s['rx2']},{s['rx3']}  "
+              f"tx {s['tx0']},{s['tx1']},{s['tx2']}  "
+              f"pm {s['pm']}  dig {s['dig0']})  "
+              f"up {s['time_ms'] / 1000.0:.0f}s")
+    return temps
+
+
+def _arm_tda(capture_dir, num_frames, prealloc_files, packing):
+    """Arm the TDA, tolerating an mmwcas built before data_packing existed.
+
+    The compiled mmwcas.so goes stale whenever mmwcas.pyx gains a parameter and
+    `make build` hasn't been re-run, and the failure lands mid-capture at arm
+    time. A 16-bit capture doesn't actually need the new argument, so retry
+    without it and carry on; a 12-bit request genuinely can't be honoured by an
+    old build, so fail with the fix instead of silently recording 16-bit data
+    that downstream would then try to unpack as 12-bit.
+    """
+    try:
+        return mmwcas.mmw_arming_tda(capture_dir, num_frames, prealloc_files,
+                                     packing)
+    except TypeError:
+        if packing:
+            raise RuntimeError(
+                "--data-packing 1 requires mmwcas to be rebuilt with "
+                "data_packing support - run: make build"
+            )
+        print("    NOTE: installed mmwcas predates the data_packing argument "
+              "(run `make build`);")
+        print("    continuing at 16-bit.")
+        return mmwcas.mmw_arming_tda(capture_dir, num_frames, prealloc_files)
+
+
+def _payload_sizes(files, cfg):
+    """{data_filename: real payload bytes} for each captured device file.
+
+    Payload = frames the TDA indexed (from <dev>_0000_idx.bin) x that device's
+    bytes-per-frame. Used to trim pre-allocation padding; files whose frame
+    count or per-frame size can't be resolved are omitted, so an unknown never
+    turns into a truncation.
+    """
+    idx_frames = {}
+    for name, size in files:
+        if not name.endswith("_idx.bin") or not str(size).isdigit():
+            continue
+        dev_id = _dev_id_from_data_bin(name)
+        n = _frames_from_idx_size(size)
+        if dev_id is not None and n:
+            idx_frames[dev_id] = n
+
+    targets = {}
+    for name, size in files:
+        if not name.endswith("_data.bin") or not str(size).isdigit():
+            continue
+        dev_id = _dev_id_from_data_bin(name)
+        if dev_id is None or dev_id not in idx_frames:
+            continue
+        bpf = _expected_bytes_per_frame_for_device(cfg, dev_id)
+        if not bpf:
+            continue
+        payload = idx_frames[dev_id] * bpf
+        if 0 < payload < int(size):
+            targets[name] = payload
+    return targets
+
+
 def _warn_on_frame_drops(files, num_frames, cfg):
     """
     Cross-check on-disk <dev>_0000_data.bin sizes against the requested frame
     count and print a prominent WARNING if the TDA wrote FEWER frames than
-    requested (dropped frames, not wall-clock jitter which is bounded to +/-1
-    frame). When frames are missing, also report the chirp-schedule duty cycle
-    and diagnose the likely cause: on this hardware the dominant cause is RF
-    FRAME OVERRUN (chirp schedule nearly fills framePeriodicity), not TDA->SSD
-    bandwidth - proven by the fact that halving the data rate (fewer RX) left
-    the drop rate unchanged, while the only low-duty-cycle preset
-    (cascade_mimo) stopped dropping. Each device file is checked independently
-    (per-device RX masks supported). Best-effort: silently returns if the
-    per-frame size can't be derived from cfg or no data files are present.
+    requested. When frames are missing, point at the cause the evidence
+    supports - the TDA capture window opening at arm time while the radar
+    starts ~2.1 s later, which TDA_ARM_FRAME_HEADROOM compensates for - and
+    refer to parse_idx.py to confirm from the TDA's own per-frame index
+    whether the gap is at the tail (truncation), internal (RF skip), or
+    scattered (throughput). Duty cycle is printed as context only: presets at
+    35% and 98% duty, differing 2x in write rate, both came up exactly
+    292/300, which rules out both RF overrun and SSD bandwidth as the
+    explanation. Each device file is checked independently (per-device RX
+    masks supported). Best-effort: silently returns if the per-frame size
+    can't be derived from cfg or no data files are present.
 
     Returns the number of dropped frames (max across device files, 0 if none).
     """
@@ -168,6 +504,18 @@ def _warn_on_frame_drops(files, num_frames, cfg):
                   if name.endswith("_data.bin") and str(size).isdigit()]
     if not data_files:
         return 0
+
+    # Frames the TDA indexed, per device. Authoritative: unlike the data file,
+    # idx.bin is one entry per captured frame and is never inflated by
+    # pre-allocation padding.
+    idx_frames = {}
+    for name, size in files:
+        if not name.endswith("_idx.bin") or not str(size).isdigit():
+            continue
+        dev_id = _dev_id_from_data_bin(name)
+        n = _frames_from_idx_size(size)
+        if dev_id is not None and n is not None:
+            idx_frames[dev_id] = n
 
     max_dropped = 0
     lines = []
@@ -188,16 +536,24 @@ def _warn_on_frame_drops(files, num_frames, cfg):
         any_sized = True
         whole = size // bpf
         partial = (size % bpf) != 0
-        dropped = num_frames - whole
+        # Prefer the index count; fall back to size/bytes-per-frame.
+        indexed = idx_frames.get(dev_id)
+        counted = indexed if indexed is not None else whole
+        dropped = num_frames - counted
         if dropped > 0:
             max_dropped = max(max_dropped, dropped)
         note = ""
         if dropped > 0:
             note = f"   <-- {dropped} dropped ({dropped / num_frames * 100:.1f}%)"
-        elif partial:
+        elif partial and indexed is None:
             note = "   <-- trailing partial frame"
-        lines.append(f"    {name:28s} {whole:>5d} frame(s)"
-                     + ("+partial" if partial else "        ") + note)
+        src = "idx" if indexed is not None else "size"
+        detail = ""
+        if indexed is not None and indexed != whole:
+            # Expected when pre-allocating: the file is padded to a fixed size.
+            detail = f" (data file holds {whole})"
+        lines.append(f"    {name:28s} {counted:>5d} frame(s) [{src}]"
+                     + detail + note)
 
     if not lines:
         return 0
@@ -208,43 +564,57 @@ def _warn_on_frame_drops(files, num_frames, cfg):
     print(f"{'-'*60}")
     for ln in lines:
         print(ln)
-    if max_dropped > 0:
+    if 0 < max_dropped <= FRAME_SHORTFALL_NOISE_FLOOR:
+        # A frame or two short is the residual tail effect, not the drop bug
+        # (which cost 8-20 frames scattered mid-capture). Don't bury it in the
+        # full diagnosis - just say so.
+        print(f"\n  NOTE: {max_dropped} frame(s) short of {num_frames} - within "
+              f"the {FRAME_SHORTFALL_NOISE_FLOOR}-frame")
+        print(f"  tail allowance. Run parse_idx.py if you need to confirm there "
+              f"are no internal gaps.")
+    elif max_dropped > 0:
         print(f"\n  ** WARNING: {max_dropped} frame(s) short of the requested "
               f"{num_frames}. **")
-        # Diagnose cause from the chirp schedule duty cycle. Empirically the
-        # dominant drop cause on this hardware is RF frame overrun (chirp
-        # schedule nearly fills framePeriodicity), NOT TDA->SSD bandwidth:
-        # halving the data rate (fewer RX) left the drop rate unchanged, while
-        # only the low-duty-cycle preset (cascade_mimo) stopped dropping.
+        # A ~3-5% loss is the measured baseline of this rig, not a misconfigured
+        # capture, so do not send the reader off tuning parameters. Every
+        # plausible knob has been tested and ruled out - see the FRAME DROPS
+        # section of this module's docstring for the evidence. Say what is
+        # known, and point at the one thing that actually helps: using the
+        # per-frame timestamps instead of assuming uniform sampling.
+        pct = max_dropped / num_frames * 100.0
+        print(f"     Two known mechanisms (see this file's FRAME DROPS "
+              f"docstring before retuning):")
+        print(f"       ~2 frames  lost at every capture length with no internal "
+              f"gap = tail")
+        print(f"                  truncation, the whole story for short "
+              f"captures;")
+        print(f"       the rest   internal single-frame gaps, ~1-2%, same "
+              f"indices on every")
+        print(f"                  device, cause still unknown.")
+        print(f"     Ruled out: page cache/writeback, write rate, SSD saturation, "
+              f"RF duty,")
+        print(f"     temperature, host wait. Studio at the same 600-frame "
+              f"config is clean")
+        print(f"     (599/600, zero internal gaps) - so this is a CLI/Ethernet "
+              f"arming-path bug,")
+        print(f"     not the TDA hardware or the RF schedule.")
+        print(f"     Inspect with:  python3 parse_idx.py --fetch <capture_dir>")
+        print(f"     IMPORTANT: _idx.bin carries a timestamp per frame. "
+              f"Downstream must place")
+        print(f"     frames by those timestamps - assuming N contiguous frames "
+              f"at dt biases every")
+        print(f"     frequency by the drop fraction (~{pct:.0f}% here).")
         active_us = _frame_active_time_us(cfg)
         try:
             period_ms = float(cfg["mimo"]["frame"]["framePeriodicity"])
         except (KeyError, TypeError, ValueError):
             period_ms = None
-        if active_us is not None and period_ms:
-            active_ms = active_us / 1000.0
-            duty = active_ms / period_ms * 100.0
-            print(f"     Chirp schedule: {active_ms:.1f} ms active per "
-                  f"{period_ms:.0f} ms frame ({duty:.0f}% duty, "
-                  f"{period_ms - active_ms:.1f} ms idle).")
-            if duty >= 90.0:
-                print(f"     -> Almost certainly RF FRAME OVERRUN: the schedule "
-                      f"nearly fills (or")
-                print(f"        exceeds) framePeriodicity, so the device skips "
-                      f"frames. This is NOT")
-                print(f"        a bandwidth problem. Fix: raise framePeriodicity, "
-                      f"or shorten the")
-                print(f"        schedule (smaller idleTimes / rampEndTime / "
-                      f"numLoops).")
-            else:
-                print(f"     -> Schedule has headroom, so this is more likely a "
-                      f"TDA->SSD throughput")
-                print(f"        hiccup. Reduce the data rate (numLoops / RX / "
-                      f"ADC samples / fps).")
-        else:
-            print(f"     Check the chirp schedule vs framePeriodicity (frame "
-                  f"overrun) first, then")
-            print(f"     the TDA->SSD data rate.")
+        if active_us is not None and period_ms and active_us / 1000.0 > period_ms:
+            print(f"     NOTE: chirp schedule ({active_us / 1000.0:.1f} ms) "
+                  f"EXCEEDS framePeriodicity")
+            print(f"     ({period_ms:.0f} ms) - that genuinely cannot be "
+                  f"honoured; shorten idleTimes /")
+            print(f"     rampEndTime / numLoops or raise framePeriodicity.")
     elif any_sized:
         print(f"\n  OK: all RX-enabled device files contain the full "
               f"{num_frames} frame(s).")
@@ -322,7 +692,8 @@ def save_ir_timestamps(capture_dir):
     return path
 
 
-def run_one_capture(exp_label, num_frames, tda_ip):
+def run_one_capture(exp_label, num_frames, tda_ip, prealloc_files=None,
+                    reclaim_padding=True):
     """
     Arm the TDA, record one capture, de-arm, then verify + export the
     .mmwave.json sidecar. Same division of responsibility as mimo.c's
@@ -364,7 +735,21 @@ def run_one_capture(exp_label, num_frames, tda_ip):
     print(f"\n>>> Capturing '{capture_dir}' — {num_frames} frames "
           f"(~{approx_s:.1f}s @ {period_s*1000:.0f} ms/frame) ...")
 
-    status = mmwcas.mmw_arming_tda(capture_dir, num_frames)
+    tda_temps_before = _read_tda_temps("pre", tda_ip)
+
+    if prealloc_files is None:
+        prealloc_files = _tda_prealloc_files(config_dict, num_frames)
+    if prealloc_files:
+        print(f"    TDA pre-allocating {prealloc_files} file(s) "
+              f"({prealloc_files * TDA_PREALLOC_FILE_BYTES / (1 << 30):.1f} GiB "
+              f"reserved per device) to keep file growth off the write path.")
+    else:
+        print(f"    TDA pre-allocation DISABLED - expect random dropped frames.")
+
+    # Arm with headroom, not num_frames - the TDA window opens now but the
+    # radar won't start for ~2.1 s (see TDA_ARM_FRAME_HEADROOM).
+    status = _arm_tda(capture_dir, num_frames + TDA_ARM_FRAME_HEADROOM,
+                      prealloc_files, _data_packing(config_dict))
     if status != 0:
         print(f"mmw_arming_tda failed (status: {status})")
         return status, capture_dir
@@ -377,6 +762,8 @@ def run_one_capture(exp_label, num_frames, tda_ip):
     global ir_recording
     if ir_enabled:
         ir_recording = True
+
+    temps_before = _read_temps("pre")
 
     status = mmwcas.mmw_start_frame()
     if status != 0:
@@ -394,10 +781,24 @@ def run_one_capture(exp_label, num_frames, tda_ip):
         print(f"mmw_stop_frame failed (status: {status})")
         return status, capture_dir
 
+    temps_after = _read_temps("post")
+    if temps_before and temps_after:
+        for dev in sorted(set(temps_before) & set(temps_after)):
+            rise = temps_after[dev]["max"] - temps_before[dev]["max"]
+            print(f"    [TEMP] dev{dev} rose {rise:+d}C over this capture "
+                  f"({temps_before[dev]['max']}C -> {temps_after[dev]['max']}C)")
+
     status = mmwcas.mmw_dearming_tda()
     if status != 0:
         print(f"mmw_dearming_tda failed (status: {status})")
         return status, capture_dir
+
+    tda_temps_after = _read_tda_temps("post", tda_ip)
+    if tda_temps_before and tda_temps_after:
+        hot_b = max(tda_temps_before.values())
+        hot_a = max(tda_temps_after.values())
+        print(f"    [TDA TEMP] SoC rose {hot_a - hot_b:+.1f}C over this capture "
+              f"({hot_b:.1f}C -> {hot_a:.1f}C)")
 
     # Check if files were actually captured
     print("\n" + "="*60)
@@ -416,6 +817,12 @@ def run_one_capture(exp_label, num_frames, tda_ip):
     # still usable, just shorter than asked for.
     _warn_on_frame_drops(files, num_frames, config_dict)
 
+    # Give back the pre-allocation padding (each reserved file is a fixed
+    # 2047 MB) so pipeline.py only transfers real frames.
+    if reclaim_padding:
+        truncate_capture_padding(_payload_sizes(files, config_dict),
+                                 capture_dir, tda_ip)
+
     # Generate configuration JSON file only if capture was successful
     json_filename = os.path.join("mmwave_json_files", f"{capture_dir}.mmwave.json")
     print(f"\nGenerating configuration file: {json_filename}")
@@ -428,6 +835,27 @@ def run_one_capture(exp_label, num_frames, tda_ip):
     upload_files_to_tda([ir_npy_path, json_filename], capture_dir, tda_ip)
 
     return status, capture_dir
+
+
+def _finish_log(tee, capture_dir, capture_ok, tda_ip):
+    """Name the log after the capture, close it, and ship it to the TDA.
+
+    Ordering matters: the log is CLOSED before it is uploaded, so the copy on
+    the TDA is complete rather than cut off mid-write. The only lines that end
+    up in the terminal but not in the file are this function's own, which is the
+    right trade - the uploaded log is the artefact that has to be trustworthy.
+
+    Only uploads on a successful capture, since a run that died before the TDA
+    directory existed has nowhere to put it; that log stays local under logs/.
+    """
+    if tee is None:
+        return
+    if capture_dir:
+        tee.rename(os.path.join("logs", f"{capture_dir}.log"))
+    path = tee.stop()
+    print(f"\n Terminal log saved: {path}")
+    if capture_ok and capture_dir:
+        upload_files_to_tda([path], capture_dir, tda_ip)
 
 
 def main():
@@ -459,6 +887,32 @@ def main():
                         type=int,
                         default=200,
                         help='IR sensor software debounce window in ms (default: 200)')
+    parser.add_argument('--tda-prealloc-files',
+                        type=int,
+                        default=-1,
+                        help='Files for the TDA to pre-allocate on its SSD before '
+                             'recording (numberOfFilesToAllocate). -1 = auto-size '
+                             'from the capture (default), 0 = disable. Each file '
+                             'reserves a fixed 2047 MB. Without pre-allocation the '
+                             'TDA grows the file while frames stream in and drops '
+                             'random frames; use 0 only to A/B test that.')
+    parser.add_argument('--data-packing',
+                        type=int,
+                        default=0,
+                        choices=(0, 1),
+                        help='TDA ADC data packing: 0 = 16-bit as-is (default), '
+                             '1 = drop the 4 LSBs and pack 12-bit, which cuts the '
+                             'write rate to 75%% and buys SSD headroom. 12-bit '
+                             'costs 4 bits of amplitude resolution and REQUIRES '
+                             'downstream unpacking - validate phase/displacement '
+                             'precision before using it for real captures.')
+    parser.add_argument('--no-reclaim-padding',
+                        action='store_true',
+                        help='Leave pre-allocated capture files at their full '
+                             'reserved size instead of truncating them down to the '
+                             'frames actually recorded. Only shrinks files, never '
+                             'grows them; disable if you want the raw 2047 MB '
+                             'files as the TDA wrote them.')
     parser.add_argument('--radar-config',
                         type=str,
                         default=DEFAULT_RADAR_CONFIG,
@@ -466,6 +920,27 @@ def main():
                         help='Named RF/geometry preset from radar_configs/*.toml '
                              f"(default: '{DEFAULT_RADAR_CONFIG}'). "
                              'Add new presets as .toml files there, not here.')
+    parser.add_argument('--no-log',
+                        action='store_true',
+                        help='Do not record this run\'s terminal output. By '
+                             'default everything printed (including the C-level '
+                             'STATUS lines from mmwcas) is written to '
+                             'logs/<capture_dir>.log and uploaded into the TDA '
+                             'capture directory alongside the .bin data, so the '
+                             'frame-drop report and temperatures stay attached '
+                             'to the capture they describe.')
+    parser.add_argument('--frame-period-ms',
+                        type=float,
+                        default=None,
+                        help='Override the preset framePeriodicity (ms). This is '
+                             'the only knob that changes the required WRITE RATE '
+                             'while holding frame count and bytes-per-frame '
+                             'fixed, so it isolates a producer/consumer rate '
+                             'mismatch from a per-frame effect: doubling it '
+                             'halves MB/s but records the identical data. '
+                             'Diagnostic use - real captures should set the '
+                             'period in the preset so .mmwave.json and the '
+                             'downstream dt stay consistent.')
 
     args = parser.parse_args()
 
@@ -476,18 +951,46 @@ def main():
     if args.frames < 1:
         print("Error: --frames must be >= 1")
         sys.exit(1)
+    if args.frame_period_ms is not None and args.frame_period_ms <= 0:
+        print("Error: --frame-period-ms must be > 0")
+        sys.exit(1)
+
+    # Start logging before ANY radar work, so a run that dies during configure
+    # still leaves a log explaining why. The capture directory name doesn't
+    # exist yet (its timestamp is minted in run_one_capture), hence the
+    # provisional filename and the rename once we know it.
+    tee = None
+    if not args.no_log:
+        provisional = os.path.join(
+            "logs", f"mimo_{datetime.now().strftime('%y%m%d_%H%M%S')}.log")
+        try:
+            tee = TeeLogger(provisional).start()
+        except (OSError, ImportError) as e:
+            print(f"[LOG] terminal logging unavailable ({e}); continuing "
+                  f"without it.")
+            tee = None
 
     # Select the RF/geometry preset (see radar_config.py) for this run.
     # deepcopy so CLI --frames can override TOML numFrames without mutating cache.
     global config_dict
     config_dict = copy.deepcopy(get_radar_config(args.radar_config))
+    if args.frame_period_ms is not None:
+        was = float(config_dict["mimo"]["frame"]["framePeriodicity"])
+        config_dict["mimo"]["frame"]["framePeriodicity"] = args.frame_period_ms
+        print(f"Frame period     : {args.frame_period_ms:.0f} ms "
+              f"(preset {was:.0f} ms) -- OVERRIDDEN, dt differs from the preset")
     period_ms = float(config_dict["mimo"]["frame"]["framePeriodicity"])
     period_s = period_ms / 1000.0
     config_dict["mimo"]["frame"]["numFrames"] = args.frames
+    # Packing is a capture-time choice, but every byte-size calculation and the
+    # .mmwave.json sidecar has to agree with it, so keep it in the config dict
+    # rather than threading it through separately.
+    config_dict["mimo"].setdefault("datapath", {})["dataPacking"] = args.data_packing
     approx_s = args.frames * period_s
 
     print(f"Capture frames   : {args.frames}  (~{approx_s:.1f}s @ {period_ms:.0f} ms/frame)")
     print(f"Radar config     : {args.radar_config}")
+    _report_write_budget(config_dict)
 
     # Configure radar
     status = mmwcas.mmw_set_config(config_dict)
@@ -519,14 +1022,21 @@ def main():
     print(f"Recording frames: {args.frames}  (~{args.frames * period_s:.1f}s)")
     print("="*60)
 
+    capture_dir = None
+    capture_ok = False
     try:
-        status, capture_dir = run_one_capture(args.directory, args.frames, args.tda_ip)
+        prealloc = (None if args.tda_prealloc_files < 0
+                    else args.tda_prealloc_files)
+        status, capture_dir = run_one_capture(args.directory, args.frames,
+                                             args.tda_ip, prealloc,
+                                             not args.no_reclaim_padding)
         if status != 0:
             sys.exit(1)
 
         print("\n" + "="*60)
         print(f"Data capture {capture_dir} completed successfully!")
         print("="*60)
+        capture_ok = True
 
     except KeyboardInterrupt:
         print("\n\nCapture interrupted by user")
@@ -538,6 +1048,7 @@ def main():
         sys.exit(1)
     finally:
         teardown_ir_sensor()
+        _finish_log(tee, capture_dir, capture_ok, args.tda_ip)
 
 if __name__ == "__main__":
     main()
