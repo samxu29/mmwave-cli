@@ -35,11 +35,20 @@ conditions before the first gap against conditions during the gap phase.
 """
 import argparse
 import os
+import re
 import subprocess
 import sys
 import time
 
 from parse_idx import _read_entries, _median
+
+# mimo.py prints these; any one is enough to recover the capture directory name.
+_CAPTURE_PATTERNS = (
+    re.compile(r"Capturing '([^']+)'"),
+    re.compile(r"Data capture (\S+) completed successfully"),
+    re.compile(r"Terminal log saved: logs/([^\s/]+)\.log"),
+    re.compile(r"Remote path: /mnt/ssd/(\S+)"),
+)
 
 SSH = ["ssh", "-oHostKeyAlgorithms=+ssh-rsa",
        "-oPubkeyAcceptedAlgorithms=+ssh-rsa",
@@ -239,6 +248,58 @@ def report(rows, gaps, t_start, t_end, n_frames, requested):
             print("     in which case none of the vm.dirty_* knobs can matter.")
 
 
+def _parse_capture_dir(text):
+    for pat in _CAPTURE_PATTERNS:
+        m = pat.search(text)
+        if m:
+            return m.group(1)
+    return None
+
+
+def _newest_tda_capture(label):
+    """Last-ditch: newest /mnt/ssd/<label>_* directory on the TDA."""
+    res = _ssh(f"ls -1dt /mnt/ssd/{label}_* 2>/dev/null | head -1")
+    line = (res.stdout or "").strip().splitlines()
+    if not line:
+        return None
+    return os.path.basename(line[0].rstrip("/"))
+
+
+def _run_capture(label, frames, radar_config, extra_args):
+    """Run mimo.py with live output; return (capture_dir, exit_code).
+
+    Always passes --no-log. mimo's TeeLogger redirects fd 1/2 through a pty and
+    an external tee; under capture_output=True that has left the parent with an
+    empty stdout pipe and no way to recover the capture directory name. The
+    probe has its own observation path - it does not need mimo's log sidecar.
+    """
+    cmd = [sys.executable, "mimo.py",
+           "--radar-config", radar_config,
+           "--frames", str(frames),
+           "--directory", label,
+           "--no-log"]
+    if extra_args:
+        cmd += extra_args.split()
+
+    print(f"Running: {' '.join(cmd)}\n", flush=True)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, bufsize=1)
+    chunks = []
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        sys.stdout.write(line)
+        sys.stdout.flush()
+        chunks.append(line)
+    rc = proc.wait()
+    text = "".join(chunks)
+    capture_dir = _parse_capture_dir(text)
+    if capture_dir is None and rc == 0:
+        capture_dir = _newest_tda_capture(label)
+        if capture_dir:
+            print(f"\n  (capture dir recovered from TDA listing: {capture_dir})")
+    return capture_dir, rc
+
+
 def main():
     global ARGS
     ap = argparse.ArgumentParser(
@@ -261,24 +322,22 @@ def main():
     capture_dir = None
     sampler = _start_sampler(ARGS.interval, ARGS.dev)
     try:
-        cmd = [sys.executable, "mimo.py",
-               "--radar-config", ARGS.radar_config,
-               "--frames", str(ARGS.frames),
-               "--directory", ARGS.directory]
-        if ARGS.extra_args:
-            cmd += ARGS.extra_args.split()
-        res = subprocess.run(cmd, capture_output=True, text=True)
-        sys.stdout.write(res.stdout)
-        for line in res.stdout.splitlines():
-            if "Capturing '" in line:
-                capture_dir = line.split("Capturing '")[1].split("'")[0]
-                break
+        capture_dir, rc = _run_capture(ARGS.directory, ARGS.frames,
+                                       ARGS.radar_config, ARGS.extra_args)
     finally:
         _stop_sampler(sampler)
 
     if not capture_dir:
-        print("Could not determine the capture directory - aborting.")
+        print("\nCould not determine the capture directory.")
+        print("  mimo.py printed no recognisable capture name, and no "
+              f"/mnt/ssd/{ARGS.directory}_* directory was found on the TDA.")
+        print("  Re-run after checking that the TDA is reachable and mimo.py "
+              "can arm a capture on its own.")
         return 1
+    if rc != 0:
+        print(f"\nNote: mimo.py exited {rc}; correlating whatever landed in "
+              f"{capture_dir} anyway.")
+
     rows = _fetch_samples()
     print(f"\nRetrieved {len(rows)} probe sample(s) from the TDA.")
     gaps, t0, t1, n = _gap_times(capture_dir)
