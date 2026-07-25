@@ -31,7 +31,10 @@ length-4 list [Dev1, Dev2, Dev3, Dev4] for per-device RX enable
 """
 import os
 
-import tomli as tomllib
+try:
+    import tomllib
+except ImportError:
+    import tomli as tomllib
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
