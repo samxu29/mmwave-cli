@@ -30,14 +30,16 @@ mmw_set_config()/mmw_init()/run_one_capture()/IR-sensor machinery directly
 (mimo.config_dict is set here, same as mimo.py's main() would) so there is
 exactly one implementation of the actual capture logic to keep correct.
 """
+import os
 import sys
 import copy
 import signal
 import argparse
+from datetime import datetime
 
 import mimo
 import mmwcas
-from utility import signal_handler
+from utility import signal_handler, TeeLogger
 from radar_config import RADAR_CONFIGS, DEFAULT_RADAR_CONFIG, get_radar_config
 
 
@@ -79,11 +81,32 @@ def run_interactive(args):
             print(f"Frame count is fixed for this session ({args.frames}); "
                   f"ignoring extra input {parts[1:]}.")
 
-        status, capture_dir = mimo.run_one_capture(exp_name, args.frames, args.tda_ip)
-        if status == 0:
-            print(f">>> Capture '{capture_dir}' completed successfully.\n")
-        else:
-            print(f">>> Capture '{capture_dir}' finished with errors (status {status}). Continuing...\n")
+        # One TeeLogger session per capture (not one for the whole REPL
+        # session) - mimo.py's _finish_log() renames the log after the
+        # capture_dir it just recorded and uploads it into that same TDA
+        # capture directory, which only makes sense 1:1 per capture.
+        tee = None
+        if not args.no_log:
+            provisional = os.path.join(
+                "logs", f"mimo_interactive_{datetime.now().strftime('%y%m%d_%H%M%S')}.log")
+            try:
+                tee = TeeLogger(provisional).start()
+            except (OSError, ImportError) as e:
+                print(f"[LOG] terminal logging unavailable ({e}); continuing "
+                      f"without it.")
+                tee = None
+
+        capture_dir = None
+        capture_ok = False
+        try:
+            status, capture_dir = mimo.run_one_capture(exp_name, args.frames, args.tda_ip)
+            if status == 0:
+                print(f">>> Capture '{capture_dir}' completed successfully.\n")
+                capture_ok = True
+            else:
+                print(f">>> Capture '{capture_dir}' finished with errors (status {status}). Continuing...\n")
+        finally:
+            mimo._finish_log(tee, capture_dir, capture_ok, args.tda_ip)
 
     print("Exiting interactive mode.")
 
@@ -118,6 +141,14 @@ def main():
                         choices=sorted(RADAR_CONFIGS),
                         help='Named RF/geometry preset from radar_configs/*.toml '
                              f"(default: '{DEFAULT_RADAR_CONFIG}').")
+    parser.add_argument('--no-log',
+                        action='store_true',
+                        help='Do not record terminal output per capture. By '
+                             'default every capture\'s printed output (including '
+                             'the C-level STATUS lines from mmwcas) is written to '
+                             'logs/<capture_dir>.log and uploaded into that '
+                             'capture\'s TDA directory alongside the .bin data, '
+                             'same as mimo.py.')
 
     args = parser.parse_args()
 
@@ -152,7 +183,6 @@ def main():
     status = mmwcas.mmw_init()
     assert status == 0, ValueError("mmw_init failed")
 
-    import os
     import time
     time.sleep(2)
     os.makedirs("mmwave_json_files", exist_ok=True)
