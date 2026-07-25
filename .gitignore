@@ -21,10 +21,11 @@ dashboard/telegraf/.env
 experiment-log/*
 logs/*
 /PostProc/*
-*.mmwave.json
-
-# Frame-drop investigation artefacts: capture indices pulled off the TDA by
-# parse_idx.py --fetch, and the per-run output of frame_sweep.py / tda_probe.py
 sweep_results/
-*_idx.bin
 probe_results/
+*_idx.bin
+*_data.bin
+*.mmwave.json
+*timestamps.npy
+*mmwave.json
+*.logs
