@@ -27,3 +27,4 @@ logs/*
 # parse_idx.py --fetch, and the per-run output of frame_sweep.py
 sweep_results/
 *_idx.bin
+probe_results/
