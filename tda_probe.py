@@ -209,16 +209,19 @@ def report(rows, gaps, t_start, t_end, n_frames, requested):
                 sum(r["wb_kb"] for r in sel) / len(sel) / 1024,
                 max(r["wb_kb"] for r in sel) / 1024)
 
-    # The comparison window must be the EARLY capture, not everything up to the
-    # first gap. Under the hypothesis we are testing, writeback switches on and
-    # frames start dying moments later, so a window ending at the first gap
-    # contains the switch-on itself and its peak looks "already active" - which
-    # is exactly how a synthetic dirty-expiry dataset got misread as refuting
-    # the theory it was built to demonstrate. Use the first half of the pre-gap
-    # period, which under the hypothesis is still quiet.
-    early_hi = max(first * 0.5, 0.1)
-    early = _window(0, early_hi)
+    # When the first gap is very early (t+0.8 s on probe_run_260724_211910),
+    # first/2 is too small to contain any 1 Hz sample and the comparison is
+    # silently skipped. Fall back to a fixed early window in that case.
+    early_hi = max(first * 0.5, 5.0)
+    if early_hi >= first:
+        early_hi = max(min(first, 5.0) - 0.05, 0.0)
+    early = _window(0, early_hi) if early_hi > 0 else None
     during = _window(first, 1e9)
+    if early is None and during is not None:
+        # Still report the during-phase numbers so a first-gap-at-t~0 run is
+        # not silent about writeback being flat zero the whole time.
+        early = (0.0, 0.0, 0.0)
+        early_hi = 0.0
     if early and during:
         print(f"  {'':26}{'mean dirty':>12} {'mean wb':>10} {'peak wb':>10}")
         print(f"  early capture (0-{early_hi:.0f}s){'':<4}{early[0]:>10.1f}M "
@@ -241,11 +244,12 @@ def report(rows, gaps, t_start, t_end, n_frames, requested):
             print("     was lost, so delayed writeback is NOT the trigger. "
                   "Rules out dirty_expire.")
         else:
-            print("  => Writeback never became significant, so the losses are "
-                  "not page-cache")
-            print("     driven at all. Look elsewhere - the capture app may "
-                  "write with O_DIRECT,")
-            print("     in which case none of the vm.dirty_* knobs can matter.")
+            print("  => Writeback never became significant (Dirty/Writeback "
+                  "~0 while the SSD")
+            print("     wrote steadily). The capture path bypasses the page "
+                  "cache; vm.dirty_*")
+            print("     knobs cannot help. Look at CSI2/DMA/capture-app drops "
+                  "above the FS.")
 
 
 def _parse_capture_dir(text):

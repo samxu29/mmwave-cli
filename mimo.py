@@ -20,43 +20,34 @@ why single-length measurements looked so noisy:
   (B) A handful of internal mid-capture gaps, single frames absent from an
       otherwise perfect grid (each gap exactly 2.00 periods, survivors at median
       100.01 ms) at IDENTICAL indices on master and slave - so a shared cause
-      upstream of the per-device links. Typically 1-2% of frames, with large
-      run-to-run scatter and NO established scaling law (see below).
+      upstream of the per-device links. Typically 1-5% of frames, with large
+      run-to-run scatter. Position within the capture is NOT fixed: clean runs
+      have started dropping only after ~30 s, but a probed 600-frame run lost
+      its first frame at t+0.8 s and kept dropping throughout - so "late onset"
+      is a common pattern, not a law.
 
-HOW (B) SCALES IS STILL OPEN. The sweep reported it growing superlinearly (0.3,
-2, 6, 28 missed slots at N = 100, 200, 300, 600), but the 600-frame points are
-not trustworthy: standalone 600-frame captures of the same preset lose ~5, not
-28-32. The sweep deleted each capture immediately before the next one ran, so
-the discard work from freeing ~4 GiB was landing inside the following capture.
-frame_sweep.py now defers all deletion to the end; the sweep needs re-running
-before any scaling claim is made.
+HOW (B) IS NOT CAUSED - settled by direct observation (tda_probe.py,
+probe_run_260724_211910, 567/600 frames, 28 internal gaps):
+  * Page cache / dirty_expire. Dirty and Writeback stayed 0.0 MB for the entire
+    capture while the SSD wrote a steady ~55-66 MB/s. The capture path bypasses
+    the page cache (O_DIRECT or equivalent). vm.dirty_expire_centisecs = 3000
+    matching the ~30 s onset on some runs was a coincidence; tuning vm.dirty_*
+    cannot help.
+  * SSD saturation. Disk busy was 10-22% during the gap phase, never pegged,
+    and write MB/s did not collapse when frames were lost.
+  * Write rate / bandwidth. 600 frames at 100 ms (62.7 MB/s) vs 200 ms
+    (31.3 MB/s) lost a similar number of internal frames.
+  * RF frame overrun / duty cycle, SSD capacity, temperature, host wait,
+    session drift - see earlier experiments.
 
-RULED OUT BY EXPERIMENT - don't re-litigate these without new evidence:
-  * RF frame overrun / duty cycle: cascade_mimo at 35% duty (65 ms idle/frame)
-    drops as much as cascade_tx3_rx8 at 98% (2.1 ms idle).
-  * WRITE RATE / bandwidth. The decisive test holds frame count and bytes per
-    frame fixed and changes only MB/s via --frame-period-ms: 600 frames at
-    100 ms (62.7 MB/s) lost 5 internal frames, and at 200 ms (31.3 MB/s) lost 7.
-    Halving the data rate changed nothing, so this is not a throughput or
-    backlog problem. (An earlier 12-bit-packing test pointed the same way but
-    was not clean, since --data-packing also changes the TDA packing path.)
-  * ELAPSED TIME. That same pair doubled capture duration from 60 s to 120 s at
-    identical frame count and saw no increase - the hazard tracks FRAMES, not
-    seconds.
-  * SSD capacity: drive was 3-5% used throughout (430 GB free).
-  * Temperature: RF dies run 43->55 degC (rated ~125), and the TDA SoC does not
-    even warm during a capture (69.8->69.4, 70.2->69.8, 70.6->70.6) - it sits at
-    ~70 degC idle because capture is I/O-bound, not compute-bound.
-  * Host wait time: +5 s of extra margin recovered nothing.
-  * Session drift ACROSS captures: with run order randomised, drop rate vs
-    session elapsed time gave r = -0.06.
-
-GOTCHAS FOR THE NEXT EXPERIMENT: one pre-allocated file holds exactly 685 frames
-per device at this preset, so captures past ~685 cross a file boundary and add a
-confound. frame_sweep.py pools gap positions over both devices, so its reported
-position count is ~2x the real number of gaps. And measure standalone captures
-before trusting any batch harness - the harness contaminated its own results
-once already.
+PRIME SUSPECT now is inside the TDA capture path ABOVE the filesystem - CSI2
+receive / DMA / the capture application itself dropping a frame before it is
+written. That is consistent with: zero page-cache activity, steady SSD write
+rate through gap seconds, shared master+slave indices, and independence from
+MB/s. We cannot see that path from this repo (TDA firmware is closed); the
+remaining levers are comparing against mmWave Studio at the SAME frame count,
+and asking whether Studio's capture app differs from the Ethernet-armed path
+we use.
 
 WHAT HELPED, MODESTLY: arming with numberOfFilesToAllocate > 0 so the TDA is not
 extending the capture file while frames stream in. Pooled means over identical
