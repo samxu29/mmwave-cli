@@ -2,7 +2,7 @@
 Cascade_Configuration_Capture_cascade_tx3_rx8_600.lua
 
 mmWave Studio capture that MATCHES radar_configs/cascade_tx3_rx8.toml used by
-mimo.py on the Pi, but runs for 600 frames (~60 s @ 100 ms). Purpose: A/B the
+mimo.py on the Pi, for 300 frames (~30 s @ 100 ms). Purpose: A/B the
 CLI frame-drop bug against Studio on the same RF / geometry / length.
 
 GEOMETRY (same as cascade_tx3_rx8.toml):
@@ -15,13 +15,12 @@ GEOMETRY (same as cascade_tx3_rx8.toml):
 RF (same as the TOML / CLI):
   3 profiles, idle 175/7/7 us, ramp 65 us, slope 60 MHz/us
   256 samples @ 4400 ksps, rxGain 48, numLoops 255, period 100 ms
-  600 frames  (was 50 in the old calib5s scripts - that is why Studio looked
-               "drop free": 5 s finishes before the CLI's long-capture losses)
+  300 frames
 
 AFTER THE CAPTURE - count real frames, do not trust file size:
   On the Pi (with TDA still holding the capture under /mnt/ssd/):
-    python3 parse_idx.py --fetch <capture_directory> --frames 600
-  Expected if Studio is clean: 600 entries, no internal gaps.
+    python3 parse_idx.py --fetch <capture_directory> --frames 300
+  Expected if Studio is clean: ~300 entries, no internal gaps.
   Expected if same bug: ~1-5% missing, identical indices on master and slave3.
 
 BEFORE RUNNING - edit if needed:
@@ -68,14 +67,14 @@ local idle_time_p2              =   7      -- us
 local start_chirp_tx            =   0
 local end_chirp_tx              =   2
 local nchirp_loops              =   255
-local nframes_master            =   600    -- 600 x 100 ms = 60 s  (CLI comparison length)
-local nframes_slave             =   600
+local nframes_master            =   300    -- 300 x 100 ms = 30 s
+local nframes_slave             =   300
 local Inter_Frame_Interval      =   100    -- ms
 local trigger_delay             =   0      -- us
 
 ------------------------------ API Configuration ------------------------------------------------
 
-WriteToLog("Setting up Studio for Cascade (cascade_tx3_rx8 / 600 frames)...\n", "blue")
+WriteToLog("Setting up Studio for Cascade (cascade_tx3_rx8 / 300 frames)...\n", "blue")
 
 if(0 == ar1.ConnectTDA(TDA_IPAddress, 5001, deviceMapOverall)) then
     WriteToLog("ConnectTDA Successful\n", "green")
@@ -327,13 +326,13 @@ end
 -- Match current CLI arming where it matters for the drop A/B:
 --   n_files_allocation = 1  (CLI pre-allocates; Studio used to leave this 0)
 --   data_packaging     = 0  (16-bit)
---   num_frames_to_capture = 0  (TDA follows FrameConfig's 600)
+--   num_frames_to_capture = 0  (TDA follows FrameConfig's 300)
 
 local timestamp           =   os.date("%Y%m%d_%H%M%S")
-capture_directory         =   "studio_tx3_rx8_600_" .. timestamp
+capture_directory         =   "studio_tx3_rx8_300_" .. timestamp
 n_files_allocation        =   1      -- match CLI pre-alloc; set 0 to match old Studio default
 data_packaging            =   0      -- 0: 16-bit, 1: 12-bit
-num_frames_to_capture     =   0      -- 0: TDA follows FrameConfig frame count (600)
+num_frames_to_capture     =   0      -- 0: TDA follows FrameConfig frame count (300)
 stop_frame_mode           =   0
 
 WriteToLog("Recording basename set to: " .. capture_directory .. "\n", "blue")
@@ -375,5 +374,5 @@ RSTD.Sleep((nframes_master * Inter_Frame_Interval) + 5000)
 
 WriteToLog("Capture complete. Directory on TDA: /mnt/ssd/" .. capture_directory .. "\n", "blue")
 WriteToLog("On the Pi, count frames with:\n", "blue")
-WriteToLog("  python3 parse_idx.py --fetch " .. capture_directory .. " --frames 600\n", "blue")
+WriteToLog("  python3 parse_idx.py --fetch " .. capture_directory .. " --frames 300\n", "blue")
 WriteToLog("Expect only master_0000_*.bin and slave3_0000_*.bin (no slave1/slave2).\n", "blue")

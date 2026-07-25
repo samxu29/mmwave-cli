@@ -78,8 +78,8 @@ local idle_time_p2              =   7      -- us
 local start_chirp_tx            =   0
 local end_chirp_tx              =   2
 local nchirp_loops              =   255    -- Number of chirp loops per frame
-local nframes_master            =   50     -- Number of Frames for Master (50 x 100ms = 5s total capture)
-local nframes_slave             =   50     -- Number of Frames for Slaves
+local nframes_master            =   300    -- Number of Frames for Master (300 x 100ms = 30s total capture)
+local nframes_slave             =   300    -- Number of Frames for Slaves
 local Inter_Frame_Interval      =   100    -- ms
 local trigger_delay             =   0      -- us
 
@@ -361,7 +361,7 @@ local timestamp          =   os.date("%Y%m%d_%H%M%S")
 capture_directory         =   "calib5s_2custom3x16mimo_" .. timestamp   -- recommended to change between captures - timestamp does this automatically
 n_files_allocation        =   0      -- 0: auto-allocate based on capture size
 data_packaging            =   0      -- 0: 16-bit, 1: 12-bit
-num_frames_to_capture     =   0      -- 0: default - TDA follows FrameConfig's own frame count (50, set above).
+num_frames_to_capture     =   0      -- 0: default - TDA follows FrameConfig's own frame count (300, set above).
                                       -- CONFIRMED via TDA log: this is the actual 5th argument to the call below
                                       -- ("Sending Number of frames to capture with value of X to TDA..").
                                       -- Do NOT put framing_type here - that was the bug in the last run: framing_type=1

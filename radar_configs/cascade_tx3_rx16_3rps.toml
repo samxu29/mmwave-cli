@@ -1,0 +1,102 @@
+# radar_configs/cascade_tx3_rx16_3rps.toml
+# 3-chirp / Dev4-TX / 16-RX preset tuned for ~3 rev/s spinning capture
+# (--radar-config cascade_tx3_rx16_3rps).
+#
+# Same geometry as cascade_tx3_rx16.toml (Dev4 TX0/TX1/TX2 on chirp0/1/2;
+# Dev1–3 RX-only), but denser frame timing: period 37 ms (~27 Hz), short
+# idle 5/5/5 us, ramp 40 us, slope ~100 MHz/us, 160 samples @ 4850 ksps.
+#
+# NOTE: 4 devices x 4 RX at this rate needs ~212 MB/s write bandwidth — well
+# above the TDA SSD's measured ~92 MB/s. Expect frame drops on long captures
+# unless length/RX/devices are reduced.
+#
+# Studio twin: lua_reference/Cascade_Configuration_Capture_cascade_tx3_rx16_3rps.lua
+# Copy this file to add a new preset; select with --radar-config <name>.
+
+[mimo.profile]
+id = 0
+startFrequency = 77             # Chirp start frequency in GHz
+frequencySlope = 99.987             # Frequency slope in MHz/us (mimo.c PATCHED value)
+# Per-profile idle times (us) - profile0/1/2 for chirp0/1/2
+idleTimes = [5, 5, 5]
+adcStartTime = 6                # ADC start time in us
+numAdcSamples = 160             # Number of ADC samples per chirp
+adcSamplingFrequency = 4850     # ADC sampling frequency in ksps (matches AWR1843 reference SAMPLE_RATE)
+rampEndTime = 40                # Chirp ramp end time in us (mimo.c PATCHED value)
+rxGain = 48                     # dB
+txStartTime = 0                 # TX starttime in us
+hpfCornerFreq1 = 0              # 0: 175kHz
+hpfCornerFreq2 = 0              # 0: 350kHz
+pfVcoSelect = 0x02              # AWR2243: 0x02 = VCO2 (77-81 GHz) - matches mmwcas/mimo.c pfVcoSelect
+pfCalLutUpdate = 0x00
+txOutPowerBackoffCode = 0x00
+txPhaseShifter = 0x00
+
+[mimo.frame]
+numLoops = 255                  # mimo.c PATCHED value (was 16)
+numFrames = 0                   # Overridden by mimo.py --frames (0 in TOML = unused)
+framePeriodicity = 37          # ms - mimo.c PATCHED value (was 50; 10Hz frame rate)
+chirpStartIdx = 0
+chirpEndIdx = 2                 # 3 chirps (0-2)
+frameTriggerDelay = 0.0
+triggerSelectMaster = 1         # software trigger
+triggerSelectSlave = 2          # hardware sync from master
+
+[mimo.channel]
+rxChannelEn = 0x0F              # Enable all 4 RX channels
+txChannelEn = 0x07              # Enable all 3 TX channels
+
+# Chirp geometry: per-device local TX antenna index per chirp (-1 = TX off).
+# Matches mmwcas/mimo.c chripTxTable - only Dev4 (index 3) transmits.
+[mimo.chirp]
+numChirps = 3
+profileIdPerChirp = [0, 1, 2]
+txAntennaTable = [
+    [-1, -1, -1],                # Dev1 master: RX only
+    [-1, -1, -1],                # Dev2 slave1: RX only
+    [-1, -1, -1],                # Dev3 slave2: RX only
+    [0, 1, 2],                   # Dev4 slave3: TX0/TX1/TX2 on chirp0/1/2
+]
+startFreqVar_MHz = 0.0
+freqSlopeVar_KHz_usec = 0.0
+idleTimeVar_usec = 0.0
+adcStartTimeVar_usec = 0.0
+
+[mimo.rfInit]
+# Documentation-only: MMWL_rfInit() (the SDK wrapper mmw_set_config() calls)
+# takes no calibEnMask parameter, so this value is written to the
+# .mmwave.json sidecar but not actually applied to the chip.
+calibEnMask = 0x1FF0             # matches MMWL_rfInit / Studio boot cals
+
+[mimo.adcOut]
+adcBits = 2                      # 16-bit
+fullScaleReducFctr = 0
+adcOutFmt = 1                    # complex
+
+[mimo.lowPower]
+lpAdcMode = 0
+
+[mimo.misc]
+miscCtl = 1                      # per-chirp phase shifter enable
+
+[mimo.ldo]
+ldoBypassEnable = 3
+supplyMonIrDrop = 0
+ioSupplyIndicator = 0
+
+[mimo.datapath]
+iqSwapSel = 0
+chInterleave = 0
+intfSel = 0                      # CSI2
+transferFmtPkt0 = 1
+transferFmtPkt1 = 0
+cqConfig = 0
+cq0TransSize = 0
+cq1TransSize = 0
+cq2TransSize = 0                 # documentation-only: rlDevDataPathCfg_t has
+                                  # no cq2TransSize field, not applied to the chip
+laneClkCfg = 1                   # 0=SDR, 1=DDR
+dataRate_Mbps = 600              # mapped to dataRate/hsiClk SDK codes at runtime;
+                                  # valid DDR rates: 600/450/400/300/225/150
+lanePosPolSel = 0x35421
+lineStartEndDis = 0
