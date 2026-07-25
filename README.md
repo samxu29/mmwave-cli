@@ -37,7 +37,7 @@ Two capture front-ends share the same hardware:
 ```
 mmwave-cli/
 ├── mimo.py                  # Python capture (raw IF) — uses mmwcas + radar_configs/
-├── mimo_interactive.py      # [DEPRECATED] REPL wrapper around mimo.py — bench/manual only
+├── mimo_interactive.py      # REPL wrapper around mimo.py — fixed frame count/session
 ├── mmwcas.pyx               # Cython bridge to TI mmWaveLink (C structs zeroed;
 │                            #   all RF values come from TOML via mmw_set_config)
 ├── radar_config.py          # Loads radar_configs/*.toml
@@ -134,29 +134,28 @@ python3 mimo.py --frames 100 --no-ir
 | `--ir-pin` | `4` | BCM GPIO pin |
 | `--ir-bounce-ms` | `200` | Debounce (ms) |
 
-### [DEPRECATED] `mimo_interactive.py` - REPL capture
+### `mimo_interactive.py` - REPL capture
 
-Bench/manual-testing-only wrapper that reuses `mimo.py`'s capture logic
-(`run_one_capture()`) in a loop: configure the radar once, then repeatedly
-type an experiment name (+ optional frame count) at an `experiment>` prompt
-to arm + record, e.g. `bridge_test` or `bridge_test 300`. Blank/`quit`/`exit`
-stops.
+Wrapper that reuses `mimo.py`'s capture logic (`run_one_capture()`) in a
+loop: configure the radar once, then repeatedly type just an experiment name
+at an `experiment>` prompt to arm + record, e.g. `bridge_test`. The frame
+count is fixed for the whole session (set once via `--frames` at startup,
+not overridable per prompt) so every capture is identical in length - same
+TDA pre-allocation sizing, same arm/wait/stop timing - which lowers drop
+risk versus varying it per capture. Blank/`quit`/`exit` stops.
 
-**Do not use for real data collection.** Two hardware limitations, neither
-fixable host-side:
+Two hardware limitations remain, neither fixable host-side:
 - Frame counts are wall-clock-based (RF chips stay at `numFrames=0`/infinite
   the whole session), not hardware-exact like `mimo.py`'s single-capture mode.
 - Making many captures back-to-back in one long-lived process is exactly the
   scenario that showed SSD/network throughput drift (capture sizes shrinking
-  run to run) - see `mimo.py`'s module docstring.
-
-For real captures, use `mimo.py` (one exact capture per process invocation)
-driven by an external shell loop instead.
+  run to run) - see `mimo.py`'s module docstring. Keep sessions reasonably
+  short and watch for drift on long runs.
 
 ```bash
 python3 mimo_interactive.py --frames 100
 # experiment> bridge_test
-# experiment> bridge_test 300
+# experiment> bridge_test_2
 ```
 
 ### Python-path TOML (`radar_configs/*.toml`)
