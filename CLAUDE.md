@@ -82,17 +82,31 @@ python3 -c "import mmwcas; print('mmwcas OK')"
 - `run_one_capture()` always resyncs the TDA's system clock to the host's over
   SSH before arming (`utility.sync_tda_clock()`) — the TDA is on an isolated
   subnet with no real time source, so its RTC free-runs from an arbitrary
-  boot value (observed years off) while the IR timestamps above use the
-  host's `time.time()`. Without this the two are on unrelated time bases and
-  can't be correlated. The TDA's `date` is BusyBox (confirmed: `%N` comes
-  back literal, not expanded), so both the read and the set are restricted
-  to syntax BusyBox has always supported — whole-second `%s`, and the
-  traditional POSIX `MMDDhhmm[CC]YY.ss` set form rather than GNU's `-s
-  @epoch`. That caps precision at roughly 1-2s (whole seconds + one SSH
-  round trip), not sub-second — enough to place an IR event in the right
-  capture session, not the exact frame. No opt-out — every capture path
-  (`mimo.py`, `mimo_interactive.py`)
-  goes through `run_one_capture()`, so this always runs.
+  boot value (observed years off, e.g. stuck at 2019). This keeps TDA-side
+  OS-clock artifacts (capture directory file mtimes, etc.) meaningful.
+  **It does NOT make `<dev>_0000_idx.bin`'s per-frame timestamp comparable
+  to the IR sensor's host-clock timestamps** — verified empirically that
+  field is a separate monotonic counter (microseconds since some
+  boot/driver-init reference, nowhere near an epoch value), unaffected by
+  the OS date (an earlier version of this doc claimed otherwise). Use
+  `check_ir_timestamps.py`'s duration cross-check instead — see below.
+  The TDA's `date` is BusyBox v1.30.1, confirmed live via `date --help`
+  (also confirmed by `%N` coming back as a literal, unexpanded string); the
+  set step tries the two `-s TIME` forms BusyBox's own `--help` documents
+  (`YYYY-MM-DD hh:mm:ss` and positional `YYYYMMDDhhmm.ss`) rather than
+  GNU's `-s @epoch` shorthand. Caps precision at roughly 1-2s (whole
+  seconds + one SSH round trip). No opt-out — every capture path
+  (`mimo.py`, `mimo_interactive.py`) goes through `run_one_capture()`, so
+  this always runs.
+- `check_ir_timestamps.py` sanity-checks a capture's IR marker regularity —
+  the rig spins at a constant rev/s, so marker-to-marker intervals should be
+  very uniform; it flags intervals >1.5x median (missed trigger) or <0.5x
+  median (debounce/double-trigger), reports measured vs `--expected-rps`,
+  and cross-checks the IR marker span's *duration* against the radar's own
+  frame timestamp span (not absolute time — see the caveat above). Supports
+  `--fetch <capture_dir>` to pull just the small sidecars (IR `.npy`,
+  `.mmwave.json`, `*_idx.bin`) from the TDA directly, same pattern as
+  `parse_idx.py --fetch`.
 
 ---
 

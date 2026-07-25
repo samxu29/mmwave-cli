@@ -330,10 +330,18 @@ def sync_tda_clock(tda_ip="192.168.33.180", timeout=15):
     The TDA sits on an isolated subnet with no route to a real time source,
     so its RTC free-runs from an arbitrary boot value (observed years off,
     not just seconds) while mimo.py's IR sensor timestamps use this host's
-    time.time(). Without this, the per-frame timestamps written into
-    <dev>_0000_idx.bin (TDA clock) and the IR marker timestamps (host clock)
-    are on unrelated time bases and can't be correlated - see "CONSEQUENCE
-    FOR DOWNSTREAM" in mimo.py's docstring.
+    time.time(). This keeps TDA-side wall-clock artifacts (capture directory
+    file mtimes, anything else that reads the OS clock) meaningful and
+    sortable by real time instead of an arbitrary 2019 boot date.
+
+    CORRECTION (verified empirically 2026-07-25, see check_ir_timestamps.py's
+    docstring): this does NOT make <dev>_0000_idx.bin's per-frame timestamp
+    field comparable to the IR marker timestamps - that field is a monotonic
+    counter (observed on the order of TDA uptime in microseconds, nowhere
+    near an epoch value), not the OS wall clock this function sets, so
+    syncing `date` has no effect on it either way. An earlier version of
+    this docstring claimed otherwise; check_ir_timestamps.py's duration
+    cross-check is the correct way to sanity-check IR-vs-frame timing.
 
     The TDA's `date` is BusyBox v1.30.1 (confirmed live over SSH: `date
     --help`), not GNU coreutils - also confirmed by `%N` (nanoseconds)
@@ -346,8 +354,7 @@ def sync_tda_clock(tda_ip="192.168.33.180", timeout=15):
     "invalid date". Both are tried in order (read stays on plain `%s`, no
     `%N`, either way), for whichever BusyBox feature set is actually
     compiled in. That caps precision at whole seconds plus one SSH round
-    trip (roughly 1-2s), not sub-second - good enough to tell which capture
-    session an IR event belongs to, not which exact frame.
+    trip (roughly 1-2s).
 
     Never raises - a failed sync is a printed warning, not a fatal error,
     since a capture with unsynced clocks is still otherwise usable.

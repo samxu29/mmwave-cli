@@ -705,8 +705,11 @@ def run_one_capture(exp_label, num_frames, tda_ip, prealloc_files=None,
 
     Always resyncs the TDA's system clock to this host's over SSH before
     arming (see utility.sync_tda_clock()) - the TDA has no real time source
-    of its own, so without this its per-frame timestamps and the host's IR
-    sensor timestamps drift apart and can't be correlated.
+    of its own, so without this its OS clock (capture directory file mtimes,
+    etc.) drifts from real time. NOTE: this does NOT make the per-frame
+    timestamps in <dev>_0000_idx.bin comparable to the IR sensor's host-clock
+    timestamps - that field is a separate monotonic counter, unaffected by
+    the OS date. Use check_ir_timestamps.py's duration cross-check instead.
 
     Capture length is num_frames: the host waits
     num_frames × framePeriodicity + one period margin before calling
