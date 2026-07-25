@@ -586,10 +586,11 @@ def _warn_on_frame_drops(files, num_frames, cfg):
         print(f"       the rest   internal single-frame gaps, ~1-2%, same "
               f"indices on every")
         print(f"                  device, cause still unknown.")
-        print(f"     Ruled out: write rate (600 frames at half the MB/s dropped "
-              f"the same),")
-        print(f"     elapsed time, RF duty cycle, SSD fill, temperature, host "
-              f"wait time.")
+        print(f"     Ruled out: page cache/writeback (Dirty=Writeback=0 during "
+              f"capture), write")
+        print(f"     rate, SSD saturation, RF duty, temperature, host wait. "
+              f"Suspect is above")
+        print(f"     the filesystem (CSI2/DMA/TDA capture app).")
         print(f"     Inspect with:  python3 parse_idx.py --fetch <capture_dir>")
         print(f"     IMPORTANT: _idx.bin carries a timestamp per frame. "
               f"Downstream must place")
