@@ -412,12 +412,12 @@ def _read_temps(label):
     try:
         temps = getter()
     except Exception as e:
-        print(f"    [TEMP] read failed ({e})")
+        print(f"    [RF TEMP] read failed ({e})")
         return None
     if not temps:
         return None
     for dev, s in sorted(temps.items()):
-        print(f"    [TEMP] {label:5s} dev{dev}: max {s['max']:3d}C  "
+        print(f"    [RF TEMP] {label:5s} dev{dev}: max {s['max']:3d}C  "
               f"(rx {s['rx0']},{s['rx1']},{s['rx2']},{s['rx3']}  "
               f"tx {s['tx0']},{s['tx1']},{s['tx2']}  "
               f"pm {s['pm']}  dig {s['dig0']})  "
@@ -795,7 +795,7 @@ def run_one_capture(exp_label, num_frames, tda_ip, prealloc_files=None,
     if temps_before and temps_after:
         for dev in sorted(set(temps_before) & set(temps_after)):
             rise = temps_after[dev]["max"] - temps_before[dev]["max"]
-            print(f"    [TEMP] dev{dev} rose {rise:+d}C over this capture "
+            print(f"    [RF TEMP] dev{dev} rose {rise:+d}C over this capture "
                   f"({temps_before[dev]['max']}C -> {temps_after[dev]['max']}C)")
 
     status = mmwcas.mmw_dearming_tda()

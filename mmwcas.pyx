@@ -378,8 +378,9 @@ cpdef uint32_t configureMimoChirp(uint8_t devId, rlChirpCfg_t chirpCfg):
         # Configure chirp and update status
         status += MMWL_chirpConfig(createDevMapFromDevId(devId), chirpCfg)
 
-        # Print debug info
-        printf(b"[CHIRP CONFIG] dev %u, chirp idx %u, profileId %u, txEnable 0x%02x, status: %d\n",
+        # Print debug info - fixed-width fields to match the STATUS/DEV MAP
+        # layout printed by check(), so columns line up in the terminal.
+        printf(b"[CHIRP CONFIG] DEV %2u | CHIRP %2u | PROFILE %2u | TX 0x%02x | STATUS %4d\n",
                devId, i, chirpCfg.profileId, chirpCfg.txEnable, status)
         if status != 0:
             printf(b"Configuration of chirp %d failed!\n", i)
