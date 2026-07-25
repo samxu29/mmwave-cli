@@ -335,17 +335,19 @@ def sync_tda_clock(tda_ip="192.168.33.180", timeout=15):
     are on unrelated time bases and can't be correlated - see "CONSEQUENCE
     FOR DOWNSTREAM" in mimo.py's docstring.
 
-    The TDA's `date` is BusyBox, not GNU coreutils - confirmed by `%N`
-    (nanoseconds) coming back as a literal "%N" instead of being expanded.
-    Which `-s TIME` syntax this particular build accepts is not something we
-    can know in advance (a first guess of the classic POSIX
-    "MMDDhhmm[CC]YY.ss" form was rejected as "invalid date" on real
-    hardware), so the set step tries a short list of the most common
-    `date -s` forms in order and uses whichever one the target accepts,
-    rather than betting the whole feature on one guess. Read stays on plain
-    `%s` (no `%N`) either way. That caps precision at whole seconds plus one
-    SSH round trip (roughly 1-2s), not sub-second - good enough to tell
-    which capture session an IR event belongs to, not which exact frame.
+    The TDA's `date` is BusyBox v1.30.1 (confirmed live over SSH: `date
+    --help`), not GNU coreutils - also confirmed by `%N` (nanoseconds)
+    coming back as a literal "%N" instead of being expanded. BusyBox's own
+    `--help` documents `-s TIME` as accepting `YYYY-MM-DD hh:mm[:ss]` and the
+    positional `[[[[[YY]YY]MM]DD]hh]mm[.ss]` form (i.e. `YYYYMMDDhhmm.ss`) -
+    note this is a DIFFERENT field order than the bare `date TIME` form
+    (`MMDDhhmm[[YY]YY][.ss]`), which is not what `-s` takes; mixing the two
+    up is what caused an earlier version of this function to fail with
+    "invalid date". Both are tried in order (read stays on plain `%s`, no
+    `%N`, either way), for whichever BusyBox feature set is actually
+    compiled in. That caps precision at whole seconds plus one SSH round
+    trip (roughly 1-2s), not sub-second - good enough to tell which capture
+    session an IR event belongs to, not which exact frame.
 
     Never raises - a failed sync is a printed warning, not a fatal error,
     since a capture with unsynced clocks is still otherwise usable.
@@ -370,17 +372,13 @@ def sync_tda_clock(tda_ip="192.168.33.180", timeout=15):
         tda_before = float(res.stdout.strip())
         offset = tda_before - (t0 + t1) / 2.0
 
-        host_epoch = int(round(time.time()))
-        gm = time.gmtime(host_epoch)
-        # Try, in order: GNU/newer-BusyBox epoch shorthand; ISO 8601 (BusyBox
-        # FEATURE_DATE_ISOFMT, also GNU); classic POSIX positional with a
-        # 2-digit year (the oldest, most minimal form); same without a
-        # seconds field, in case ".ss" itself is what a given build rejects.
+        gm = time.gmtime()
+        # Both forms BusyBox's own `date --help` documents for `-s TIME`
+        # (see docstring) - ISO first since that's what was confirmed
+        # working live against the actual TDA hardware.
         set_candidates = [
-            f"@{host_epoch}",
             time.strftime("%Y-%m-%d %H:%M:%S", gm),
-            time.strftime("%m%d%H%M%y.%S", gm),
-            time.strftime("%m%d%H%M%y", gm),
+            time.strftime("%Y%m%d%H%M.%S", gm),
         ]
         last_err = ""
         for candidate in set_candidates:
