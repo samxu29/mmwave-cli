@@ -174,6 +174,7 @@ def main():
     print(f"Capture frames   : {args.frames}  (~{approx_s:.1f}s @ {period_ms:.0f} ms/frame)"
           "  [fixed for this session]")
     print(f"Radar config     : {args.radar_config}")
+    mimo._report_write_budget(mimo.config_dict)
 
     status = mmwcas.mmw_set_config(mimo.config_dict)
     if status != 0:
