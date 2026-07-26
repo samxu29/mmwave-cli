@@ -123,6 +123,7 @@ from utility import sync_tda_clock
 from utility import fetch_rf_frame_timestamps
 from utility import save_rpi_frame_timestamps
 from utility import TeeLogger
+from check_timestamp import analyse_intervals
 from radar_config import RADAR_CONFIGS, DEFAULT_RADAR_CONFIG, get_radar_config
 import os
 
@@ -862,6 +863,20 @@ def run_one_capture(exp_label, num_frames, tda_ip, prealloc_files=None,
         capture_dir, tda_ip, float(config_dict["mimo"]["frame"]["framePeriodicity"]))
     rpi_frame_ts_path = save_rpi_frame_timestamps(
         rf_frame_ts, host_start_time, capture_dir)
+
+    # Frame CONSTANCY check: the total-dropped-count above says nothing about
+    # WHERE a drop landed - a truncated tail (last N frames missing) and a
+    # single frame skipped mid-capture both shave the same count off the
+    # total, but only the latter breaks the "uniform dt" assumption
+    # downstream code relies on. Reuse check_timestamp.py's median-based
+    # interval analysis (same 1.5x/0.5x-median heuristic it applies to the
+    # IR marker stream) directly on this capture's own per-frame timestamps,
+    # so an internal gap is called out right here instead of only being
+    # discoverable by running check_timestamp.py/parse_idx.py afterward.
+    if rf_frame_ts is not None and len(rf_frame_ts) >= 2:
+        expected_frame_hz = 1000.0 / float(config_dict["mimo"]["frame"]["framePeriodicity"])
+        analyse_intervals(rf_frame_ts, "RF radar frame timestamps (TDA monotonic clock)",
+                          "frame", expected_frame_hz)
 
     # Give back the pre-allocation padding (each reserved file is a fixed
     # 2047 MB) so downstream transfer only moves real frames.
