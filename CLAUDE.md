@@ -9,7 +9,7 @@ Capture tooling for **Bridge Structural Health Monitoring** research using a TID
 **Research context:** PhD project at IMRSL, Muroran Institute of Technology.  
 **Goal:** Detect bridge dominant vibration frequency and displacement via sub-mm radar (Permanent Scatterer) interferometry.
 
-**Status:** Raw IF capture (`mimo.py` / `mimo_interactive.py`) is the active workflow. Current focus is hardening capture against dropped frames — see the FRAME DROPS investigation in `mimo.py`'s module docstring.
+**Status:** Raw IF capture (`mimo.py` / `mimo_interactive.py`) is the active workflow. Mid-capture frame drops track the radar RF/geometry preset (`--radar-config`), not the CLI arm path — see the FRAME DROPS section in `mimo.py`'s module docstring (`cascade_baseline.toml` is a known-clean reference).
 
 ---
 
@@ -179,7 +179,7 @@ scp -O -oHostKeyAlgorithms=+ssh-rsa -oPubkeyAcceptedAlgorithms=+ssh-rsa \
 Format: `<label>_<YYMMDD>_<HHMMSS>`  
 Example: `RPI_python_bridge_260525_080012`
 
-The `--label` argument sets the prefix. Timestamp is appended automatically by `mimo.py`.
+The `--exp-name` argument sets the prefix. Timestamp is appended automatically by `mimo.py`.
 
 ---
 

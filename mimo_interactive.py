@@ -5,12 +5,12 @@ mimo_interactive.py - interactive REPL for mimo.py's radar capture
 Configure the RF chips once, then repeat many named captures without
 re-launching the process. The frame count is fixed for the whole session -
 set once via --frames at startup, applied to every capture - rather than
-overridable per prompt. Each prompt takes only an experiment name. This
-keeps every capture in the session identical in length (same TDA
-pre-allocation sizing, same arm/wait/stop timing), which is what varying
-per-prompt frame counts put at risk: mismatched pre-allocation and wait
-windows are a contributor to dropped frames, so removing that source of
-variation lowers drop chances across a session.
+overridable per prompt. Each prompt takes only an exp_name (same role as
+mimo.py --exp-name). This keeps every capture in the session identical in
+length (same TDA pre-allocation sizing, same arm/wait/stop timing), which
+is what varying per-prompt frame counts put at risk: mismatched
+pre-allocation and wait windows are a contributor to dropped frames, so
+removing that source of variation lowers drop chances across a session.
 
 Two known hardware constraints remain, neither fixable from the host side:
   1. Frame counts here are wall-clock-based, not hardware-exact (the RF
@@ -46,7 +46,7 @@ from radar_config import RADAR_CONFIGS, DEFAULT_RADAR_CONFIG, get_radar_config
 def run_interactive(args):
     """
     REPL loop: configure once (RF numFrames=0, i.e. infinite framing), then
-    repeatedly prompt for an experiment name only. Every capture in the
+    repeatedly prompt for an exp_name only. Every capture in the
     session uses the same fixed args.frames count, set once at startup -
     each capture arms the TDA and waits args.frames x framePeriodicity
     (+ margin) before calling mmw_stop_frame() - no RF reconfiguration
@@ -62,14 +62,16 @@ def run_interactive(args):
     print(f"Every capture in this session uses {args.frames} frames "
           f"(~{args.frames * period_ms / 1000.0:.1f}s @ {period_ms:.0f} ms/frame) - "
           "fixed at startup via --frames.")
-    print("At the prompt, type an experiment name to arm + record, e.g.:")
+    print("At the prompt, type an exp_name to arm + record, e.g.:")
     print("  bridge_test")
+    print("  (same role as mimo.py --exp-name; final TDA dir is "
+          "exp_name_<YYMMDD>_<HHMMSS>)")
     print(f"Frame period: {period_ms:.0f} ms  ({1000.0/period_ms:.1f} fps)")
     print("Type 'quit'/'exit' or leave blank to stop.\n")
 
     while True:
         try:
-            line = input("experiment> ").strip()
+            line = input("exp_name> ").strip()
         except EOFError:
             break
         if not line or line in ("quit", "exit"):
@@ -114,11 +116,17 @@ def run_interactive(args):
 def main():
     parser = argparse.ArgumentParser(
         description='TIDEP-01012 MIMO Cascade Radar - interactive REPL capture')
-    parser.add_argument('--frames',
+    parser.add_argument('-f', '--frames',
                         type=int,
                         default=100,
                         help='Frame count for every capture in this session, fixed at '
                              'startup (no per-prompt override). Default: 100.')
+    parser.add_argument('-c', '--radar-config',
+                        type=str,
+                        default=DEFAULT_RADAR_CONFIG,
+                        choices=sorted(RADAR_CONFIGS),
+                        help='Named RF/geometry preset from radar_configs/*.toml '
+                             f"(default: '{DEFAULT_RADAR_CONFIG}').")
     parser.add_argument('--tda-ip',
                         type=str,
                         default='192.168.33.180',
@@ -135,12 +143,6 @@ def main():
                         type=int,
                         default=200,
                         help='IR sensor software debounce window in ms (default: 200)')
-    parser.add_argument('--radar-config',
-                        type=str,
-                        default=DEFAULT_RADAR_CONFIG,
-                        choices=sorted(RADAR_CONFIGS),
-                        help='Named RF/geometry preset from radar_configs/*.toml '
-                             f"(default: '{DEFAULT_RADAR_CONFIG}').")
     parser.add_argument('--no-log',
                         action='store_true',
                         help='Do not record terminal output per capture. By '
@@ -174,7 +176,6 @@ def main():
     print(f"Capture frames   : {args.frames}  (~{approx_s:.1f}s @ {period_ms:.0f} ms/frame)"
           "  [fixed for this session]")
     print(f"Radar config     : {args.radar_config}")
-    mimo._report_write_budget(mimo.config_dict)
 
     status = mmwcas.mmw_set_config(mimo.config_dict)
     if status != 0:

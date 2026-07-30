@@ -3,7 +3,7 @@
 #
 # PATCHED 3-chirp / single-TX-device scheme (Dev4 TX0/TX1/TX2 on chirp0/1/2;
 # Dev1–3 RX-only). Not TI's original 12-chirp / 4-device MIMO scheme
-# (see cascade_mimo.toml for that). Matches mimo.c + Cascade_Configuration_
+# (see cascade_baseline.toml for that). Matches mimo.c + Cascade_Configuration_
 # Capture_Ready2ArmTrigger.lua geometry.
 #
 # adcSamplingFrequency = 4400 ksps (matches AWR1843 reference SAMPLE_RATE).

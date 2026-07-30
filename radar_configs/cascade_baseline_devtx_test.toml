@@ -1,0 +1,104 @@
+# radar_configs/cascade_baseline_devtx_test.toml
+# A/B vs cascade_baseline: Dev4 (slave3) has ALL TX off; every device still RX.
+# (--radar-config cascade_baseline_devtx_test)
+#
+# Paired with:
+#   lua_reference/Cascade_Configuration_Capture_cascade_baseline_devtx_test.lua
+#
+# UPDATED 2026-07-27: an earlier variant kept all 12 baseline chirps with
+# chirps 0-2 as silent (no-TX) slots after gating Dev4 TX off. That schedule
+# produced heavy mid-capture drops (256/300, 35 gaps). This version REMOVES
+# those chirps and remaps the remaining 9 (same TX order as
+# cascade_baseline_devrx_test) so we can separate "empty TX slots in the
+# frame" from "fewer TX antennas / Dev4 TX off".
+#
+# Geometry:
+#   Dev1-4 all RX-enabled (16 RX); Dev4 TX gated off
+#   chirp 0-2  -> Dev3 TX2/TX1/TX0
+#   chirp 3-5  -> Dev2 TX2/TX1/TX0
+#   chirp 6-8  -> Dev1 TX2/TX1/TX0
+
+[mimo.profile]
+id = 0
+startFrequency = 77
+frequencySlope = 79
+idleTimes = [5, 5, 5]
+adcStartTime = 6
+numAdcSamples = 256
+adcSamplingFrequency = 8000
+rampEndTime = 40
+rxGain = 48
+txStartTime = 0
+hpfCornerFreq1 = 0
+hpfCornerFreq2 = 0
+pfVcoSelect = 0x02
+pfCalLutUpdate = 0x00
+txOutPowerBackoffCode = 0x00
+txPhaseShifter = 0x00
+
+[mimo.frame]
+numLoops = 64
+numFrames = 0
+framePeriodicity = 100
+chirpStartIdx = 0
+chirpEndIdx = 8                 # 9 chirps (silent Dev4 slots removed)
+frameTriggerDelay = 0.0
+triggerSelectMaster = 1
+triggerSelectSlave = 2
+
+[mimo.channel]
+rxChannelEn = 0x0F              # all 4 devices still RX -> 16 RX
+txChannelEn = 0x07
+
+# Chirp:  0  1  2  3  4  5  6  7  8
+# Dev1:  -- -- -- -- -- -- T2 T1 T0
+# Dev2:  -- -- -- T2 T1 T0 -- -- --
+# Dev3:  T2 T1 T0 -- -- -- -- -- --
+# Dev4:  -- -- -- -- -- -- -- -- --  (TX off; still RX)
+[mimo.chirp]
+numChirps = 9
+profileIdPerChirp = [0, 0, 0, 0, 0, 0, 0, 0, 0]
+txAntennaTable = [
+    [-1, -1, -1, -1, -1, -1,  2,  1,  0],  # Dev1 master
+    [-1, -1, -1,  2,  1,  0, -1, -1, -1],  # Dev2 slave1
+    [ 2,  1,  0, -1, -1, -1, -1, -1, -1],  # Dev3 slave2
+    [-1, -1, -1, -1, -1, -1, -1, -1, -1],  # Dev4 slave3: TX off
+]
+startFreqVar_MHz = 0.0
+freqSlopeVar_KHz_usec = 0.0
+idleTimeVar_usec = 0.0
+adcStartTimeVar_usec = 0.0
+
+[mimo.rfInit]
+calibEnMask = 0x1FF0
+
+[mimo.adcOut]
+adcBits = 2
+fullScaleReducFctr = 0
+adcOutFmt = 1
+
+[mimo.lowPower]
+lpAdcMode = 0
+
+[mimo.misc]
+miscCtl = 1
+
+[mimo.ldo]
+ldoBypassEnable = 3
+supplyMonIrDrop = 0
+ioSupplyIndicator = 0
+
+[mimo.datapath]
+iqSwapSel = 0
+chInterleave = 0
+intfSel = 0
+transferFmtPkt0 = 1
+transferFmtPkt1 = 0
+cqConfig = 0
+cq0TransSize = 0
+cq1TransSize = 0
+cq2TransSize = 0
+laneClkCfg = 1
+dataRate_Mbps = 600
+lanePosPolSel = 0x35421
+lineStartEndDis = 0

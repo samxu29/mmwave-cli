@@ -18,8 +18,15 @@
 #include <time.h>
 #include <errno.h>
 
-/* AWR2243 meta image file */
-#include "../firmware/xwr22xx_metaImage.h"
+/* AWR2243 meta image file - DFP 02.02.02.01 (TI-recommended for AWR2243
+   ES1.1). Firmware only - mmwavelink SDK below stays on this repo's
+   originally-vendored 02.02.03.01 (ti/mmwavelink/), since swapping that too
+   previously caused a slave device power-up failure (see FRAME DROPS in
+   mimo.py's module docstring). Kept 2026-07-27 per TI's documented
+   recommendation for this exact silicon revision, independent of whether
+   it measurably changes the frame-drop rate (it alone did not, in testing -
+   see the same docstring section). */
+#include "../mmwave_dfp_02_02_02_01/firmware/xwr22xx_metaImage.h"
 #include "rls_osi.h"
 // #include "../firmware/xwr12xx_metaImage.h"
 

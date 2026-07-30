@@ -43,7 +43,7 @@ mmwave-cli/
 ├── radar_config.py          # Loads radar_configs/*.toml
 ├── radar_configs/           # TOML presets for mimo.py
 │   ├── cascade_tx3_rx16.toml   # default Python preset (3 TX chirps, Dev4 TX)
-│   └── cascade_mimo.toml       # TI full 12-chirp / 4-device MIMO (from Lua)
+│   └── cascade_baseline.toml   # TI stock 12-chirp / 4-device MIMO (known-clean)
 ├── fetch_to_usb.sh          # Offload captures from the TDA onto a USB drive
 ├── utility.py               # SCP helpers, .mmwave.json export, etc.
 ├── setup.py                 # Build mmwcas Cython extension
@@ -110,13 +110,13 @@ and each capture gets a fully fresh `mmw_init()`.
 
 ```bash
 # 100 frames (~10 s @ 100 ms), default radar preset (cascade_tx3_rx16)
-python3 mimo.py --frames 100 --directory my_capture
+python3 mimo.py --frames 100 --exp-name my_capture
 
 # 300 frames ≈ 30 s at 10 fps
-python3 mimo.py --frames 300 --directory my_capture --radar-config cascade_tx3_rx16
+python3 mimo.py --frames 300 --exp-name my_capture --radar-config cascade_tx3_rx16
 
-# TI full 12-chirp MIMO (from Cascade_Configuration_MIMO.lua)
-python3 mimo.py --frames 100 --directory my_capture --radar-config cascade_mimo
+# TI stock 12-chirp MIMO baseline (known-clean drop reference)
+python3 mimo.py --frames 100 --exp-name my_capture --radar-config cascade_baseline
 
 # Disable IR GPIO timestamps
 python3 mimo.py --frames 100 --no-ir
@@ -126,7 +126,7 @@ python3 mimo.py --frames 100 --no-ir
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `-d` / `--directory` | `mmwave_python` | Capture name prefix (timestamp appended) |
+| `-e` / `--exp-name` | `mmwave_python` | Experiment name prefix (timestamp appended) |
 | `--frames` | `100` | Capture length in **radar frames** (exact) |
 | `--tda-ip` | `192.168.33.180` | TDA IP |
 | `--radar-config` | `cascade_tx3_rx16` | Preset name = `radar_configs/<name>.toml` |
@@ -168,7 +168,7 @@ Preset name = filename without `.toml`:
 | File | `--radar-config` | Meaning |
 |------|------------------|---------|
 | `radar_configs/cascade_tx3_rx16.toml` | `cascade_tx3_rx16` | **Default.** 3 chirps, Dev4 TX0/1/2, idle 175/7/7 µs, 4400 ksps, 255 loops, 100 ms frames |
-| `radar_configs/cascade_mimo.toml` | `cascade_mimo` | TI Lua MIMO: 12 chirps, all 4 devices TX, slope 79, 8000 ksps, 64 loops, 10 frames |
+| `radar_configs/cascade_baseline.toml` | `cascade_baseline` | TI Lua MIMO: 12 chirps, all 4 devices TX, slope 79, 8000 ksps, 64 loops; known-clean drop reference |
 
 #### Add a new preset
 
@@ -350,7 +350,7 @@ the uploaded `.mmwave.json` / IR `.npy` sidecars).
 Built-in Python presets:
 
 - **`cascade_tx3_rx16`** — default; 3 TX chirps on Dev4, 16 RX virtual array style geometry used in current experiments  
-- **`cascade_mimo`** — full TI 12-chirp MIMO from `lua_reference/Cascade_Configuration_MIMO.lua`
+- **`cascade_baseline`** — full TI 12-chirp MIMO from `lua_reference/Cascade_Configuration_MIMO.lua` / `Cascade_Configuration_Capture_cascade_baseline.lua`
 
 ---
 

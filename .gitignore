@@ -15,14 +15,19 @@ mmwave
 /build
 .DS_Store
 /ir_timestamps/*
+/rf_bins/
+/rf_frame_timestamps/
+/rpi_frame_timestamps/
+/ti/mmwavestudio_reference/
 __pycache__/
-dashboard/telegraf/.env
+/PostProc/
+/sweep_results/
+/experiment-log/
+/probe_results/
+/logs/
+/radar_configs/test/
 
-experiment-log/*
-logs/*
-/PostProc/*
-sweep_results/
-probe_results/
+dashboard/telegraf/.env
 *_idx.bin
 *_data.bin
 *.mmwave.json

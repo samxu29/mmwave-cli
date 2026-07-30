@@ -1,0 +1,107 @@
+# radar_configs/cascade_baseline_devrx_test.toml
+# A/B vs cascade_baseline: Dev4 (slave3) has ALL RX off -> device DROPPED
+# from the cascade (--radar-config cascade_baseline_devrx_test).
+#
+# Paired with:
+#   lua_reference/Cascade_Configuration_Capture_cascade_baseline_devrx_test.lua
+#
+# Stock TDA cannot keep a device enabled with 0 RX (CreateApp times out), so
+# rxChannelEn[3]=0 drops Dev4 entirely (no power / config / .bin). A dropped
+# device also cannot TX, so Dev4's baseline chirps 0-2 are removed and the
+# remaining 9 chirps are remapped to 0-8 (Dev3/Dev2/Dev1 TX only).
+#
+# Use with cascade_baseline_devtx_test (Dev4 TX off, Dev4 still RX) to see
+# whether TX-off vs RX-off/drop on the same physical device changes drop
+# behaviour relative to cascade_baseline.
+#
+# Geometry:
+#   Dev1-3 enabled (12 RX); Dev4 dropped
+#   chirp 0-2  -> Dev3 TX2/TX1/TX0
+#   chirp 3-5  -> Dev2 TX2/TX1/TX0
+#   chirp 6-8  -> Dev1 TX2/TX1/TX0
+
+[mimo.profile]
+id = 0
+startFrequency = 77
+frequencySlope = 79
+idleTimes = [5, 5, 5]
+adcStartTime = 6
+numAdcSamples = 256
+adcSamplingFrequency = 8000
+rampEndTime = 40
+rxGain = 48
+txStartTime = 0
+hpfCornerFreq1 = 0
+hpfCornerFreq2 = 0
+pfVcoSelect = 0x02
+pfCalLutUpdate = 0x00
+txOutPowerBackoffCode = 0x00
+txPhaseShifter = 0x00
+
+[mimo.frame]
+numLoops = 64
+numFrames = 0
+framePeriodicity = 100
+chirpStartIdx = 0
+chirpEndIdx = 8                 # 9 chirps (0-8); baseline 0-2 removed with Dev4
+frameTriggerDelay = 0.0
+triggerSelectMaster = 1
+triggerSelectSlave = 2
+
+[mimo.channel]
+# Per-device RX; 0 drops that device from the cascade (master must stay on).
+rxChannelEn = [0x0F, 0x0F, 0x0F, 0]   # Dev4 dropped -> 12 physical RX
+txChannelEn = 0x07
+
+# Chirp:  0  1  2  3  4  5  6  7  8
+# Dev1:  -- -- -- -- -- -- T2 T1 T0
+# Dev2:  -- -- -- T2 T1 T0 -- -- --
+# Dev3:  T2 T1 T0 -- -- -- -- -- --
+# Dev4:  -- -- -- -- -- -- -- -- --  (dropped; row required, all TX off)
+[mimo.chirp]
+numChirps = 9
+profileIdPerChirp = [0, 0, 0, 0, 0, 0, 0, 0, 0]
+txAntennaTable = [
+    [-1, -1, -1, -1, -1, -1,  2,  1,  0],  # Dev1 master
+    [-1, -1, -1,  2,  1,  0, -1, -1, -1],  # Dev2 slave1
+    [ 2,  1,  0, -1, -1, -1, -1, -1, -1],  # Dev3 slave2
+    [-1, -1, -1, -1, -1, -1, -1, -1, -1],  # Dev4 (dropped)
+]
+startFreqVar_MHz = 0.0
+freqSlopeVar_KHz_usec = 0.0
+idleTimeVar_usec = 0.0
+adcStartTimeVar_usec = 0.0
+
+[mimo.rfInit]
+calibEnMask = 0x1FF0
+
+[mimo.adcOut]
+adcBits = 2
+fullScaleReducFctr = 0
+adcOutFmt = 1
+
+[mimo.lowPower]
+lpAdcMode = 0
+
+[mimo.misc]
+miscCtl = 1
+
+[mimo.ldo]
+ldoBypassEnable = 3
+supplyMonIrDrop = 0
+ioSupplyIndicator = 0
+
+[mimo.datapath]
+iqSwapSel = 0
+chInterleave = 0
+intfSel = 0
+transferFmtPkt0 = 1
+transferFmtPkt1 = 0
+cqConfig = 0
+cq0TransSize = 0
+cq1TransSize = 0
+cq2TransSize = 0
+laneClkCfg = 1
+dataRate_Mbps = 600
+lanePosPolSel = 0x35421
+lineStartEndDis = 0

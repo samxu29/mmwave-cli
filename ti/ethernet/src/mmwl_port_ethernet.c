@@ -2061,6 +2061,17 @@ int Network_connect(Network_SockObj *pObj, char *ipAddr, uint32_t port) {
 
   socklen_t optlen = sizeof(flags);
 
+  // TCP_NODELAY tried 2026-07-27 (present in Studio's original Windows
+  // EthernetLib, missing from this Linux port) as a fix for internal
+  // mid-capture frame gaps - REVERTED the same day: on real hardware it
+  // made things dramatically worse (300-frame capture truncated at 113
+  // frames / 4.8s instead of running the full ~11.3s, 62% dropped vs the
+  // usual ~4%), most likely a race between this control socket's
+  // send and async-receive paths that different packet timing exposed
+  // (Network_read/RecvResponse do loop correctly for partial reads, so it
+  // is not a naive single-recv() framing bug - the actual mechanism is
+  // still unconfirmed). Do not re-add without root-causing that race
+  // first. See FRAME DROPS in mimo.py's module docstring.
   int status = setsockopt(pObj->clientSocketId, IPPROTO_TCP, SO_KEEPALIVE, &flags, optlen);
   flags = keepaliveIntervalSec;
   status &= setsockopt(pObj->clientSocketId, IPPROTO_TCP, TCP_KEEPIDLE, &flags, optlen);

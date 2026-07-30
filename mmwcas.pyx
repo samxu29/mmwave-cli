@@ -873,9 +873,14 @@ cpdef mmw_set_config(dict configdict):
     config.datapathClkCfg.dataRate = <uint8_t>(rate_code)
     config.hsClkCfg.hsiClk = <uint16_t>(hsi_clk_code)
 
-    # NOTE: mimo.rfInit.calibEnMask is intentionally NOT applied here -
-    # MMWL_rfInit() takes no calibEnMask parameter in this build. Optional
-    # in TOML; written to .mmwave.json for documentation only when present.
+    # NOTE: mimo.rfInit.calibEnMask is NOT read from the TOML config here -
+    # mmw_init()'s MMWL_rfInit() call (ti/mmwave/mmwave.c) hardcodes
+    # rlRfInitCalibConfig()'s calibEnMask to 0x1FF0 (all 9 boot calibration
+    # bits enabled) internally before running RfInit, matching what every
+    # lua_reference/*.lua script does via its own RfInitCalibConfig_mult
+    # call (also always "enable everything"). So the TOML field is
+    # documentation of what actually runs, not a knob - it is written to
+    # .mmwave.json for that reason, but changing it here would do nothing.
 
     config.frameCfg.numAdcSamples = 2 * config.profileCfg[0].numAdcSamples
     # dataFmtCfg.rxChannelEn is applied per-device in configure(); seed with

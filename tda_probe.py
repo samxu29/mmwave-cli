@@ -26,8 +26,8 @@ The sampler writes to /tmp on the TDA (tmpfs), never to /mnt/ssd, so probing
 cannot itself perturb the capture it is measuring.
 
 USAGE:
-    python3 tda_probe.py --frames 600 --directory probe_run
-    python3 tda_probe.py --frames 600 --directory probe_slow --extra-args "--frame-period-ms 200"
+    python3 tda_probe.py --frames 600 --exp-name probe_run
+    python3 tda_probe.py --frames 600 --exp-name probe_slow --extra-args "--frame-period-ms 200"
 
 Prints a per-second table of dirty MB, writeback MB, SSD write rate and disk
 busy %, with the rows where frames were lost marked, plus a summary comparing
@@ -280,7 +280,7 @@ def _run_capture(label, frames, radar_config, extra_args):
     cmd = [sys.executable, "mimo.py",
            "--radar-config", radar_config,
            "--frames", str(frames),
-           "--directory", label,
+           "--exp-name", label,
            "--no-log"]
     if extra_args:
         cmd += extra_args.split()
@@ -311,7 +311,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--frames", type=int, default=600)
     ap.add_argument("--radar-config", default="cascade_tx3_rx8")
-    ap.add_argument("--directory", default="probe")
+    ap.add_argument("--exp-name", dest="exp_name", default="probe")
     ap.add_argument("--tda-ip", default="192.168.33.180")
     ap.add_argument("--interval", default="1",
                     help="sampling period in seconds (default 1; busybox sleep "
@@ -326,7 +326,7 @@ def main():
     capture_dir = None
     sampler = _start_sampler(ARGS.interval, ARGS.dev)
     try:
-        capture_dir, rc = _run_capture(ARGS.directory, ARGS.frames,
+        capture_dir, rc = _run_capture(ARGS.exp_name, ARGS.frames,
                                        ARGS.radar_config, ARGS.extra_args)
     finally:
         _stop_sampler(sampler)

@@ -2163,25 +2163,26 @@ int MMWL_ArmingTDA(rlTdaArmCfg_t tdaArmCfgArgs) {
   int retVal = RL_RET_CODE_OK;
   int timeOutCnt = 0U;
 
-  /* Set width and height for all devices*/
-	/* Master */
-  /*
-	retVal = setWidthAndHeight(1, mmwl_TDA_width[0], mmwl_TDA_height[0]);
-	if (retVal != RL_RET_CODE_OK) {
-		DEBUG_PRINT(
-      "ERROR: Device map 1 : Setting width = %u and height = %u failed with error code %d \n\n",
-      mmwl_TDA_width[0], mmwl_TDA_height[0], retVal
-    );
-		return -1;
-	}
-	else {
-		DEBUG_PRINT(
-      "INFO: Device map 1 : Setting width = %u and height = %u successful\n\n",
-      mmwl_TDA_width[0], mmwl_TDA_height[0]
-    );
-	}
-  */
+  /* Set width and height for all ACTIVE devices only - matches TI's
+     Cascade_Example (MMWL_ArmingTDA in mmw_example.c), which loops the
+     master unconditionally then each slave gated on mmwl_TDA_SlavesEnabled.
+     mmwl_TDA_width/height[i] are only ever written by MMWL_frameConfig(),
+     which configure() (mmwcas.pyx) only calls for devices in the active
+     device map - so both staying at their {0} initializer is exactly the
+     "this device was never configured" signal, without needing deviceMap
+     threaded into this function's signature. Previously called
+     setWidthAndHeight() unconditionally for all 4 indices, including
+     dropped devices (rxChannelEn=0, e.g. Dev2/Dev3 in the 8-RX presets) -
+     telling the TDA to size a VIP capture channel width=0/height=0 for a
+     device never armed on the RF side. Fixed 2026-07-27; kept isolated
+     from the DFP/firmware A/B (mmwave.h's firmware include) after that
+     combination caused a slave device power-up failure - testing this fix
+     alone. See FRAME DROPS in mimo.py's module docstring. */
 	for (int i = 0; i < 4; i++) {
+    if (mmwl_TDA_width[i] == 0 && mmwl_TDA_height[i] == 0) {
+      DEBUG_PRINT("INFO: Device map %u : not configured, skipping width/height\n\n", 1 << i);
+      continue;
+    }
     retVal = setWidthAndHeight(1 << i, mmwl_TDA_width[i], mmwl_TDA_height[i]);
     if (retVal != RL_RET_CODE_OK) {
       DEBUG_PRINT(

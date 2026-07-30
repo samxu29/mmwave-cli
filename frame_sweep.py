@@ -83,7 +83,7 @@ def _run_capture(label, frames, radar_config, extra_args):
     cmd = [sys.executable, "mimo.py",
            "--radar-config", radar_config,
            "--frames", str(frames),
-           "--directory", label]
+           "--exp-name", label]
     if extra_args:
         cmd += extra_args.split()
     res = subprocess.run(cmd, capture_output=True, text=True)
@@ -332,7 +332,7 @@ def main():
                          "(default 3)")
     ap.add_argument("--radar-config", default="cascade_tx3_rx8")
     ap.add_argument("--tda-ip", default="192.168.33.180")
-    ap.add_argument("--label", default="sweep")
+    ap.add_argument("--exp-name", dest="exp_name", default="sweep")
     ap.add_argument("--extra-args", default="",
                     help="extra flags passed through to mimo.py, e.g. "
                          "'--frame-period-ms 200' or '--tda-prealloc-files 0'")
@@ -368,7 +368,7 @@ def main():
         elapsed_min = (time.time() - t0) / 60.0
         print(f"\n[{i}/{len(grid)}] {n} frames, repeat {rep} "
               f"(t+{elapsed_min:.1f} min) ...", flush=True)
-        capture_dir, ok = _run_capture(f"{args.label}_{n}f_r{rep}", n,
+        capture_dir, ok = _run_capture(f"{args.exp_name}_{n}f_r{rep}", n,
                                        args.radar_config, args.extra_args)
         if not ok:
             print(f"  capture FAILED - skipping this point")

@@ -14,12 +14,14 @@
 # 3-chirp pattern in cascade_tx3_rx8_3rps.toml, just duplicated onto a second
 # TX device instead of extending one device to 12 chirps).
 #
-# DATA RATE: 160 x 6 x 255 x 16 RX x 4 bytes / 0.076 s ~= 206 MB/s - well over
-# the TDA SSD's measured ~92 MB/s sustained write rate (see mimo.py
-# TDA_SSD_WRITE_MBPS). Doubling framePeriodicity from the 3rps base only
-# halves the rate a 4x-larger geometry (2x chirps, 2x RX) produces; expect
-# heavy frame drops at this rate. Lower numAdcSamples/adcSamplingFrequency or
-# lengthen framePeriodicity further if a sustainable capture is needed.
+# DATA RATE note: 160 x 6 x 255 x 16 RX x 4 bytes / 0.076 s ~= 206 MB/s.
+# This preset shows mid-capture frame drops under Studio and CLI (mechanism
+# B tracks the radar config - see mimo.py FRAME DROPS). Prefer cascade_baseline.toml
+# for a known-clean reference. Doubling framePeriodicity from the 3rps base
+# only halves the rate a 4x-larger geometry produces.
+#
+# Headroom sweep (same geometry, longer period): see
+#   cascade_tx6_rx16_3rps_test*.toml  (p100 / p120 / test=152 / p200).
 #
 # Copy this file to add a new preset; select with --radar-config <name>.
 

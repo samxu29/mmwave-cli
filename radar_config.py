@@ -20,8 +20,8 @@ a missing key raises ValueError. mmw_init() refuses to run until
 mmw_set_config() has succeeded.
 
 Adding a new preset:
-    1. Copy radar_configs/cascade_tx3_rx16.toml (or another preset), rename it
-       (e.g. radar_configs/wide_idle.toml -> preset name "wide_idle").
+    1. Copy an existing *.toml (production in radar_configs/, experiments in
+       radar_configs/test/), rename it (stem = --radar-config name).
     2. Edit only the fields that differ.
     3. Select it:  python3 mimo.py --radar-config <name>
 
@@ -49,22 +49,36 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 RADAR_CONFIG_DIR = os.path.join(_HERE, "radar_configs")
 
 # Built-in default preset name (radar_configs/cascade_tx3_rx16.toml).
-DEFAULT_RADAR_CONFIG = "cascade_tx3_rx8_3rps"
+DEFAULT_RADAR_CONFIG = "cascade_tx6_rx16_3rps_object"
 
 
 def _load_all_presets(directory=RADAR_CONFIG_DIR):
-    """Load every *.toml file in `directory` into {name: config_dict},
-    keyed by filename stem (e.g. cascade_tx3_rx16.toml -> "cascade_tx3_rx16")."""
+    """Load every *.toml under `directory` (and one-level `test/` subdir).
+
+    Keyed by filename stem (e.g. cascade_tx3_rx16.toml -> "cascade_tx3_rx16").
+    Experiment presets live in radar_configs/test/ and are selected the same
+    way: --radar-config <stem>.
+    """
     if not os.path.isdir(directory):
         raise RuntimeError(f"Radar config directory not found: {directory}")
     presets = {}
-    for fname in sorted(os.listdir(directory)):
-        if not fname.endswith(".toml"):
-            continue
-        name = fname[: -len(".toml")]
-        path = os.path.join(directory, fname)
-        with open(path, "rb") as f:
-            presets[name] = tomllib.load(f)
+    search_dirs = [directory]
+    test_dir = os.path.join(directory, "test")
+    if os.path.isdir(test_dir):
+        search_dirs.append(test_dir)
+    for d in search_dirs:
+        for fname in sorted(os.listdir(d)):
+            if not fname.endswith(".toml"):
+                continue
+            name = fname[: -len(".toml")]
+            path = os.path.join(d, fname)
+            if name in presets:
+                raise RuntimeError(
+                    f"Duplicate radar config name '{name}' "
+                    f"(already loaded, also found at {path})"
+                )
+            with open(path, "rb") as f:
+                presets[name] = tomllib.load(f)
     if not presets:
         raise RuntimeError(f"No .toml radar config presets found in {directory}")
     return presets
