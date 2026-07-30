@@ -32,8 +32,8 @@ frequencySlope = 70             # Frequency slope in MHz/us (mimo.c PATCHED valu
 # Per-profile idle times (us) - profile0/1/2 for chirp0/1/2
 idleTimes = [7, 7, 7]
 adcStartTime = 6                # ADC start time in us
-numAdcSamples = 200             # Number of ADC samples per chirp
-adcSamplingFrequency = 4850     # ADC sampling frequency in ksps (matches AWR1843 reference SAMPLE_RATE)
+numAdcSamples = 160             # Number of ADC samples per chirp
+adcSamplingFrequency = 4000     # ADC sampling frequency in ksps (matches AWR1843 reference SAMPLE_RATE)
 rampEndTime = 55                # Chirp ramp end time in us (mimo.c PATCHED value)
 rxGain = 48                     # dB
 txStartTime = 0                 # TX starttime in us

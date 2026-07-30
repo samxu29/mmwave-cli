@@ -32,5 +32,5 @@ dashboard/telegraf/.env
 *_data.bin
 *.mmwave.json
 *timestamps.npy
-*mmwave.json
+*map.json
 *.logs
