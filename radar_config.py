@@ -48,8 +48,8 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 # Not the same as config/*.toml (mimo.c / ./mmwave schema).
 RADAR_CONFIG_DIR = os.path.join(_HERE, "radar_configs")
 
-# Built-in default preset name (radar_configs/cascade_tx3_rx16.toml).
-DEFAULT_RADAR_CONFIG = "cascade_tx6_rx16_3rps_object"
+# Built-in default preset name (radar_configs/cascade_baseline.toml).
+DEFAULT_RADAR_CONFIG = "cascade_baseline"
 
 
 def _load_all_presets(directory=RADAR_CONFIG_DIR):

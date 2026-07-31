@@ -1,0 +1,118 @@
+# radar_configs/cascade_tx7_rx16_1rps.toml
+# 7-chirp / 3-TX-device (Dev2+Dev3+Dev4) / 16-RX (all 4 devices) preset,
+# derived from cascade_tx6_rx16_1rps.toml
+# (--radar-config cascade_tx7_rx16_1rps).
+#
+# Same chirp/profile timing as cascade_tx6_rx16_1rps.toml (period 100 ms,
+# idle 7/7/7 us, ramp 55 us, slope 70 MHz/us, 160 samples @ 4000 ksps) -
+# only the TX geometry changes: enables Dev3 (slave2) middle antenna
+# (local TX1 = global TX8) on an extra chirp.
+#   Dev1 (master):  TX off, RX on
+#   Dev2 (slave1):  TX on,  RX on
+#   Dev3 (slave2):  TX on (middle / TX1 only), RX on
+#   Dev4 (slave3):  TX on,  RX on
+# All 16 physical RX active (4 devices x 4 RX). Global TX order per chirp:
+#   TX4, TX5, TX6, TX8, TX10, TX11, TX12
+# (Dev2 TX0/1/2, Dev3 TX1 middle, Dev4 TX0/1/2).
+#
+# DATA RATE note: 160 x 7 x 255 x 16 RX x 4 bytes / 0.100 s ~= 183 MB/s.
+# This preset inherits the mid-capture frame-drop risk of the TX6/RX16
+# family (mechanism B tracks the radar config - see mimo.py FRAME DROPS).
+# Prefer cascade_baseline.toml for a known-clean reference.
+#
+# Copy this file to add a new preset; select with --radar-config <name>.
+
+[mimo.profile]
+id = 0
+startFrequency = 77             # Chirp start frequency in GHz
+frequencySlope = 70             # Frequency slope in MHz/us (mimo.c PATCHED value)
+# Per-profile idle times (us) - profile0/1/2 for chirp0/1/2
+idleTimes = [7, 7, 7]
+adcStartTime = 6                # ADC start time in us
+numAdcSamples = 160             # Number of ADC samples per chirp
+adcSamplingFrequency = 4000     # ADC sampling frequency in ksps (matches AWR1843 reference SAMPLE_RATE)
+rampEndTime = 55                # Chirp ramp end time in us (mimo.c PATCHED value)
+rxGain = 48                     # dB
+txStartTime = 0                 # TX starttime in us
+hpfCornerFreq1 = 0              # 0: 175kHz
+hpfCornerFreq2 = 0              # 0: 350kHz
+pfVcoSelect = 0x02              # AWR2243: 0x02 = VCO2 (77-81 GHz) - matches mmwcas/mimo.c pfVcoSelect
+pfCalLutUpdate = 0x00
+txOutPowerBackoffCode = 0x00
+txPhaseShifter = 0x00
+
+[mimo.frame]
+numLoops = 255                  # mimo.c PATCHED value (was 16)
+numFrames = 0                   # Overridden by mimo.py --frames (0 in TOML = unused)
+framePeriodicity = 115          # ms - same as cascade_tx6_rx16_1rps.toml
+chirpStartIdx = 0
+chirpEndIdx = 6                 # 7 chirps (0-6)
+frameTriggerDelay = 0.0
+triggerSelectMaster = 1         # software trigger
+triggerSelectSlave = 2          # hardware sync from master
+
+[mimo.channel]
+# Per-device RX mask [Dev1, Dev2, Dev3, Dev4]. All 4 devices enabled with all
+# 4 RX each -> 16 physical RX.
+rxChannelEn = [0x0F, 0x0F, 0x0F, 0x0F]
+txChannelEn = 0x07              # Enable all 3 TX channels
+
+# Chirp geometry: per-device local TX antenna index per chirp (-1 = TX off).
+# Global TX:  4  5  6  8 10 11 12
+# Chirp:      0  1  2  3  4  5  6
+# Dev1:      -- -- -- -- -- -- --
+# Dev2:      T0 T1 T2 -- -- -- --   # TX4/5/6
+# Dev3:      -- -- -- T1 -- -- --   # TX8 - slave2 middle antenna
+# Dev4:      -- -- -- -- T0 T1 T2   # TX10/11/12
+[mimo.chirp]
+numChirps = 7
+profileIdPerChirp = [0, 1, 2, 1, 0, 1, 2]
+txAntennaTable = [
+    [-1, -1, -1, -1, -1, -1, -1],    # Dev1 master: RX only
+    [0, 1, 2, -1, -1, -1, -1],       # Dev2 slave1: TX0/TX1/TX2 on chirp0/1/2 (TX4/5/6)
+    [-1, -1, -1, 1, -1, -1, -1],     # Dev3 slave2: TX1 (middle / TX8) on chirp3
+    [-1, -1, -1, -1, 0, 1, 2],       # Dev4 slave3: TX0/TX1/TX2 on chirp4/5/6 (TX10/11/12)
+]
+startFreqVar_MHz = 0.0
+freqSlopeVar_KHz_usec = 0.0
+idleTimeVar_usec = 0.0
+adcStartTimeVar_usec = 0.0
+
+[mimo.rfInit]
+# Documentation-only: MMWL_rfInit() (the SDK wrapper mmw_set_config() calls)
+# takes no calibEnMask parameter, so this value is written to the
+# .mmwave.json sidecar but not actually applied to the chip.
+calibEnMask = 0x1FF0             # matches MMWL_rfInit / Studio boot cals
+
+[mimo.adcOut]
+adcBits = 2                      # 16-bit
+fullScaleReducFctr = 0
+adcOutFmt = 1                    # complex
+
+[mimo.lowPower]
+lpAdcMode = 0
+
+[mimo.misc]
+miscCtl = 1                      # per-chirp phase shifter enable
+
+[mimo.ldo]
+ldoBypassEnable = 3
+supplyMonIrDrop = 0
+ioSupplyIndicator = 0
+
+[mimo.datapath]
+iqSwapSel = 0
+chInterleave = 0
+intfSel = 0                      # CSI2
+transferFmtPkt0 = 1
+transferFmtPkt1 = 0
+cqConfig = 0
+cq0TransSize = 0
+cq1TransSize = 0
+cq2TransSize = 0                 # documentation-only: rlDevDataPathCfg_t has
+                                  # no cq2TransSize field, not applied to the chip
+laneClkCfg = 1                   # 0=SDR, 1=DDR
+dataRate_Mbps = 600              # mapped to dataRate/hsiClk SDK codes at runtime;
+                                  # valid DDR rates: 600/450/400/300/225/150
+lanePosPolSel = 0x35421
+lineStartEndDis = 0
