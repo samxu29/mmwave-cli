@@ -68,13 +68,35 @@ USAGE:
     # "_Nrps" capture directory name if present)
     python3 check_timestamp.py --fetch <capture_dir> --expected-rps 3
 
+    # IR sensor markers are OPTIONAL (2026-08-11): a bench/sanity capture
+    # made without the spinning rig (e.g. a dev machine with no RPi.GPIO,
+    # or a run made with --no-ir) has no *_ir_timestamps.npy at all - the
+    # positional npy_file arg can simply be omitted. Frame-rate verification
+    # (measured vs requested Hz, rate-lock, missed/doubled intervals) still
+    # runs off rf_frame_timestamps.npy/rpi_frame_timestamps.npy alone; only
+    # the IR-vs-frame cross-checks are skipped. E.g., to just verify FPS on
+    # a capture made on hardware with no IR sensor attached:
+    python3 check_timestamp.py --fetch <capture_dir> --tda-ip 192.168.33.180
+
 Reports, for the IR markers AND (when available) each frame-timestamp
 array: count, inter-event interval min/median/max/mean/stdev, measured
-rate, every interval more than 1.5x (missed-trigger/dropped-frame
-candidate) or less than 0.5x (bounce/double-trigger candidate) the median.
-Then: the IR-span-vs-frame-span duration cross-check, and the per-marker
-nearest-frame time-difference comparison described above (exact if
-rpi_frame_timestamps.npy is available, approximate otherwise).
+rate, period p10/p90 spread, every interval more than 1.5x (missed-
+trigger/dropped-frame candidate) or less than 0.5x (bounce/double-trigger
+candidate) the median. Then: the IR-span-vs-frame-span duration
+cross-check, and the per-marker nearest-frame time-difference comparison
+described above (exact if rpi_frame_timestamps.npy is available,
+approximate otherwise).
+
+RATE-LOCK detector (2026-08-11): analyse_intervals() also flags a measured
+rate that sits materially BELOW the requested rate (--expected-rps or the
+framePeriodicity-derived Hz) with a TIGHT p10..p90 spread across the whole
+run - the signature of a throughput/pacing ceiling silently stretching
+every frame period (e.g. a capture card's packet-delay setting bottle-
+necking below the config's required data rate), as opposed to random
+jitter or an isolated missed/dropped event (which the existing >1.5x-
+median check already covers). See analyse_intervals()'s docstring for the
+full reasoning and why this repo's own TDA2/SSD capture path hasn't
+exhibited it in practice.
 """
 import argparse
 import json
@@ -180,6 +202,18 @@ def _median(xs):
     return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2.0
 
 
+def _percentile(sorted_xs, p):
+    """Nearest-rank percentile (p in [0, 100]) of an already-sorted list.
+    No interpolation - fine for the coarse rate-lock check below, where
+    we only care about "is the whole distribution tight", not an exact
+    stat."""
+    n = len(sorted_xs)
+    if n == 0:
+        return 0.0
+    idx = min(n - 1, max(0, int(round(p / 100.0 * (n - 1)))))
+    return sorted_xs[idx]
+
+
 def analyse_intervals(ts, title, unit_name="marker", expected_hz=None):
     """
     Print regularity stats and flag irregular inter-event intervals for a
@@ -188,6 +222,27 @@ def analyse_intervals(ts, title, unit_name="marker", expected_hz=None):
     index are each supposed to be evenly spaced at their own nominal rate,
     and a gap in either one (missed IR trigger, or a dropped radar frame)
     shows the same signature: one interval well above the local median.
+
+    RATE-LOCK check (added 2026-08-11, prompted by a DCA1000/GbE-based rig
+    on different hardware where the capture card's packet-delay setting
+    throttled the achievable link rate below what the configured chirp/RX
+    load required - the RDIF backpressure sensor then stretched every
+    frame period out to "however long one frame actually takes to send",
+    with essentially zero jitter, since it's a rate ceiling, not random
+    delay). That signature - measured rate below expected_hz, but the
+    spread across the WHOLE run (p10..p90) is tight, not just a couple of
+    isolated >1.5x-median gaps - is different from a dropped/missed event
+    and would NOT be flagged by the missed/doubled checks below (a
+    uniform slow-down doesn't create an outlier vs the local median, it
+    just shifts the median itself). Flagged here as "RATE-LOCKED" so a
+    silent config-exceeds-throughput case doesn't get misread as clean
+    timing. On THIS repo's TIDEP-01012 cascade + TDA2/SSD path there is no
+    DCA1000/packet-delay knob in the picture (mmwcas' rlTdaArmCfg_t has no
+    such field - see mimo.py's FRAME DROPS docstring), and the mechanism-B
+    A/B already controlled for a pure throughput explanation there, so
+    this has not fired in practice here; kept general/hardware-agnostic
+    in case a future preset or a different capture path does hit a real
+    throughput ceiling.
 
     Returns (deltas, median_interval_s).
     """
@@ -215,10 +270,39 @@ def analyse_intervals(ts, title, unit_name="marker", expected_hz=None):
           f"mean {mean*1000:.1f}  stdev {stdev*1000:.2f} ms  (CV {cv_pct:.2f}%)")
     measured_hz = 1.0 / med if med else 0.0
     print(f"  measured rate      : {measured_hz:.3f} Hz  (1 / median interval)")
+
+    deltas_sorted = sorted(deltas)
+    p10 = _percentile(deltas_sorted, 10)
+    p90 = _percentile(deltas_sorted, 90)
+    spread_pct = (p90 - p10) / med * 100.0 if med else 0.0
+    print(f"  period p10..p90    : {p10*1000:.1f} .. {p90*1000:.1f} ms "
+          f"(spread {spread_pct:.2f}% of median)")
+
     if expected_hz:
         err_pct = (measured_hz - expected_hz) / expected_hz * 100.0
         print(f"  expected rate      : {expected_hz:.3f} Hz   -> measured is "
               f"{err_pct:+.2f}% off")
+        # Tight whole-run spread (not just 1-2 outlier gaps) + a materially
+        # slower-than-requested rate = a rate ceiling, not jitter/dropped
+        # events - see this function's RATE-LOCK note above.
+        if err_pct <= -1.0 and spread_pct <= 8.0 and n >= 5:
+            print(f"\n  ** RATE-LOCKED: measured rate is {abs(err_pct):.1f}% "
+                  f"below the requested {expected_hz:.3f} Hz, with a tight "
+                  f"p10..p90 spread ({spread_pct:.2f}%) across the WHOLE run "
+                  f"- not just 1-2 isolated gaps. **")
+            print(f"     This is the signature of a THROUGHPUT/PACING "
+                  f"CEILING (the pipeline is stretching every period out to "
+                  f"however long one frame actually takes), not random "
+                  f"jitter or a one-off missed/dropped {unit_name}.")
+            print(f"     Consequence: frame count can come out looking "
+                  f"'correct' while every frame is later than its nominal "
+                  f"N x period slot - timestamp-based placement (see "
+                  f"mimo.py's CONSEQUENCE FOR DOWNSTREAM note) is required, "
+                  f"and if the host's wait is sized from the NOMINAL period "
+                  f"(see mimo.py's _wait_s_for_frames()) it will also stop "
+                  f"the capture before the stretched-rate frame count "
+                  f"catches up, which then LOOKS like ordinary dropped "
+                  f"frames on top of this.")
 
     # A spinning blade at constant rev/s (or a radar sampling at constant
     # framePeriodicity) should be very uniform, so use the same 1.5x-median
@@ -419,22 +503,36 @@ def main():
         json_path = json_path or fetched_json
         idx_path = idx_path or fetched_idx
 
-    if not npy_path:
-        ap.error("no IR timestamps .npy (pass a path or use --fetch CAPTURE_DIR)")
+    # IR markers are OPTIONAL (2026-08-11): a bench/sanity capture made off
+    # the spinning rig - e.g. a dev machine with no RPi.GPIO, or --no-ir -
+    # has no *_ir_timestamps.npy at all, but the whole point of this tool
+    # (checking measured vs requested frame rate) still works from the
+    # frame-timestamp sidecars alone. Only bail out if there is NOTHING to
+    # analyse at all.
+    if not npy_path and not (rpi_frame_ts_path or rf_frame_ts_path or idx_path):
+        ap.error("nothing to analyse: no IR timestamps .npy AND no frame "
+                 "timestamp source (--rpi-frame-ts/--rf-frame-ts/--idx, or "
+                 "--fetch CAPTURE_DIR)")
 
     expected_rps = args.expected_rps
     if expected_rps is None:
-        m = re.search(r"_(\d+(?:\.\d+)?)rps", capture_label or npy_path)
+        m = re.search(r"_(\d+(?:\.\d+)?)rps", capture_label or npy_path or "")
         if m:
             expected_rps = float(m.group(1))
             print(f"(parsed expected rev/s = {expected_rps} from the capture name)")
 
-    try:
-        ir_ts = np.load(npy_path)
-    except (OSError, ValueError) as e:
-        print(f"ERROR: could not load {npy_path}: {e}", file=sys.stderr)
-        sys.exit(1)
-    print(f"Loaded {len(ir_ts)} IR marker(s) from {npy_path}")
+    ir_ts = np.array([], dtype=np.float64)
+    if npy_path:
+        try:
+            ir_ts = np.load(npy_path)
+        except (OSError, ValueError) as e:
+            print(f"ERROR: could not load {npy_path}: {e}", file=sys.stderr)
+            sys.exit(1)
+        print(f"Loaded {len(ir_ts)} IR marker(s) from {npy_path}")
+    else:
+        print("No IR timestamps .npy found/given - skipping IR marker "
+              "analysis and IR-vs-frame cross-checks (frame-rate checks "
+              "below are unaffected, they don't need the IR sensor).")
 
     period_ms = 100.0
     if json_path and os.path.exists(json_path):
@@ -449,7 +547,8 @@ def main():
                   f"using default {period_ms:.0f} ms for idx.bin unit "
                   f"auto-detection)")
 
-    analyse_intervals(ir_ts, "IR sensor timestamps", "marker", expected_rps)
+    if len(ir_ts) > 0:
+        analyse_intervals(ir_ts, "IR sensor timestamps", "marker", expected_rps)
 
     expected_frame_hz = 1000.0 / period_ms if period_ms else None
 

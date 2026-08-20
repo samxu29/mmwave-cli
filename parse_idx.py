@@ -255,8 +255,23 @@ def analyse(path, period_ms, requested_frames, dump_fields=False):
     ts_ms = [t * to_ms for t in ts]
     span_ms = ts_ms[-1] - ts_ms[0]
     print(f"  timestamp unit     : {unit} (auto-detected)")
+    print(f"  first frame ts     : {ts_ms[0]:.3f} ms  (raw {ts[0]} {unit}, TDA clock)")
+    print(f"  last frame ts      : {ts_ms[-1]:.3f} ms  (raw {ts[-1]} {unit}, TDA clock)")
     print(f"  capture span       : {span_ms/1000.0:.3f} s "
           f"({span_ms:.0f} ms across {n} frames)")
+    if requested_frames:
+        # Expected span if all requested_frames had landed: (N-1) intervals,
+        # since span is first-to-last timestamp, not N whole periods.
+        expected_span_ms = (requested_frames - 1) * period_ms
+        span_diff_ms = span_ms - expected_span_ms
+        if span_diff_ms <= 0:
+            diff_note = (f"{span_diff_ms:+.0f} ms "
+                        f"({-span_diff_ms/period_ms:.2f} periods short)")
+        else:
+            diff_note = f"{span_diff_ms:+.0f} ms longer"
+        print(f"  expected span      : {expected_span_ms/1000.0:.3f} s "
+              f"({requested_frames} frames requested x {period_ms:.0f} ms nominal) "
+              f"-> measured is {diff_note}")
     print(f"  inter-frame period : min {min(deltas)*to_ms:.2f}  "
           f"median {med*to_ms:.2f}  max {max(deltas)*to_ms:.2f}  ms "
           f"(nominal {period_ms:.0f})")

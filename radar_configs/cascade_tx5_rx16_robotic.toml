@@ -1,0 +1,197 @@
+# radar_configs/cascade_tx5_rx16_robotic.toml
+# 5-chirp / 3-TX-device (Dev2+Dev3+Dev4) / 16-RX (all 4 devices) preset for
+# UR3e ROBOTIC-ARM baseline captures (--radar-config cascade_tx5_rx16_robotic).
+# Forked from cascade_tx5_rx16_5rps.toml; only [mimo.frame] timing changed
+# (see FRAME TIMING DERIVATION below). Antenna geometry (txAntennaTable),
+# profile RF settings, and datapath are unchanged from that preset.
+#
+# Sparse subset of the TX7 global numbering (even-spaced TX across the
+# array): TX4, TX6, TX8, TX10, TX12 only, in that order.
+#   Dev1 (master):  TX off, RX on
+#   Dev2 (slave1):  TX on (T0 + T2), RX on
+#   Dev3 (slave2):  TX on (middle / T1 = TX8), RX on
+#   Dev4 (slave3):  TX on (T0 + T2), RX on
+# All 16 physical RX active (4 devices x 4 RX). This physical TX/RX pitch is
+# fixed by the TIDEP-01012 cascade board layout (not TOML-configurable) and
+# is engineered by TI to synthesize a virtual array at lambda/2 - it is NOT
+# the "antenna spacing" this preset's frame timing is solving for below.
+#
+# ---------------------------------------------------------------------------
+# FRAME/LOOP TIMING DERIVATION (robotic-arm scan, UR3e mounted radar)
+# ---------------------------------------------------------------------------
+# The radar body itself is what's moving here (mounted on the UR3e TCP), so
+# successive antenna "snapshots" act as samples of a mechanically-scanned
+# synthetic aperture. Round-trip (monostatic) phase from a displacement d is
+# phi = 4*pi*d/lambda, so to keep phase coherent between consecutive
+# snapshots (no 2*pi wrap, which is what the sub-mm Permanent-Scatterer
+# displacement/vibration processing in this repo relies on) the antenna
+# must not travel more than lambda/4 between them:
+#
+#   d_per_snapshot = v_arm * T_snapshot  <=  lambda / 4
+#
+# Wavelength at the 77 GHz start frequency: lambda = c / f = 3.8934 mm
+#   -> lambda / 4 = 0.9734 mm
+#
+# UR3e arm velocity used for this bound: looked up in robotic_control/*.py
+# (motion_circle.py, motion_line_horz.py, motion_line_vert.py) - the ACTIVE,
+# uncommented tuning in every script commands speed = 0.1 m/s (100 mm/s);
+# the "HIGH SPEED"/"AGGRESSIVE" blocks up to 1.0-1.5 m/s are present only as
+# commented-out alternates and are NOT used for this baseline. (Universal
+# Robots' own UR3e datasheet lists an absolute hardware max TCP speed of
+# 3 m/s - cited here as the hard ceiling, but it is ~30x this project's
+# actual scan speed and is not the design point.)
+#
+#   T_snapshot_max = (lambda/4) / v_arm = 0.9734 mm / 100 mm/s = 9.73 ms
+#
+# PURE SAR IMAGING, NOT MIMO AoA: the arm's motion synthesizes the aperture
+# (successive LOOPS are the aperture samples), so the 5-chirp/5-TX cycling
+# within one loop is NOT being used to resolve angle from simultaneous
+# multi-antenna phase (that's what would require the loop itself to stay
+# "frozen" in space). Design principle instead: fire all 5 TX in one loop
+# as a tight burst (idleTimes back to the 7us baseline -> 235us/loop, TX
+# antennas effectively co-located in time/space - negligible 0.0235mm of
+# arm travel across the whole burst), then let ALL the lambda/4 budget sit
+# in the GAP BETWEEN loops (framePeriodicity), not spread inside one.
+#
+# DESIGN POINT: adjacent LOOP spacing set close to lambda/4 (not
+# oversampled), at ~92% of the 9.73ms budget -> framePeriodicity = 9ms,
+# numLoops = 1 so "loop" and "frame" are the same event (one loop = one
+# SAR aperture sample). The 235us active burst leaves ~8.76ms of genuine
+# inter-loop idle inside that 9ms period - trivially fits (no schedule-fit
+# risk at all, unlike the old idleTimes-inflation approach), the RF chip is
+# just sitting there waiting for the frame trigger while the arm moves.
+#
+#   loop-to-loop displacement @ 0.1 m/s = 100 mm/s * 9ms = 0.9 mm
+#   lambda/4 margin = 0.9734 / 0.9 = 1.08x (intentionally tight - this is
+#   the "close to lambda/4" design point, not an oversampled one)
+#
+# TRUE RF duty cycle (ramp-only, 5*40us / 9ms) is still only ~2.2% - that's
+# inherent to sampling this sparsely for SAR at this arm speed (must wait
+# ~9ms between aperture samples to stay near lambda/4), not a symptom of
+# how idle time is distributed. What changed vs. the idleTimes-inflation
+# version: motion smear WITHIN a loop is now ~0.0235mm (across the whole
+# 5-TX burst) instead of ~0.9mm - only matters if this data is ever also
+# used for MIMO AoA/virtual-array processing, but costs nothing to keep
+# tight either way.
+#
+# If you need MORE margin (e.g. to absorb moveL blend/accel speed
+# transients above the nominal 0.1 m/s), lower framePeriodicity below 9ms
+# (recompute against the 9.73ms budget).
+#
+# ARM SPEED <-> framePeriodicity REFERENCE (framePeriodicity_max_ms =
+# lambda/4 [0.9734mm] / v_arm, i.e. v_max_for_this_file = 0.9734/9ms =
+# 0.108 m/s - current 0.1 m/s already uses 92.5% of that ceiling, matching
+# the 1.08x margin above). If robotic_control/*.py is ever switched from
+# its active 0.1 m/s to one of its commented-out faster alternates, this
+# file's framePeriodicity must be recomputed - it does NOT auto-scale:
+#
+#   v_arm        framePeriodicity_max   note
+#   0.1  m/s     9.73  ms                current default (this file: 9ms)
+#   0.5  m/s     1.95  ms                still comfortable (235us loop overhead = 12% of budget)
+#   1.0  m/s     0.97  ms                tighter (235us loop overhead = 24% of budget)
+#   1.5  m/s     0.65  ms                tight (235us loop overhead = 36% of budget)
+#   3.0  m/s     0.32  ms                UR3e hw ceiling - marginal: the fixed 235us
+#                                        loop overhead (idleTimes+rampEndTime, unrelated
+#                                        to framePeriodicity) alone eats ~72% of the
+#                                        whole budget; would likely also need shorter
+#                                        idleTimes/rampEndTime/fewer chirps to stay usable.
+#
+# Copy this file to add a new preset; select with --radar-config <name>.
+
+[mimo.profile]
+id = 0
+startFrequency = 77             # Chirp start frequency in GHz
+frequencySlope = 95             # Frequency slope in MHz/us (mimo.c PATCHED value)
+# Per-profile idle times (us) - profile0/1/2 for chirp0/1/2
+# Baseline tight values (unchanged from cascade_tx5_rx16_5rps.toml) - see
+# FRAME/LOOP TIMING DERIVATION above: all 5 TX fire as one tight ~235us
+# burst per loop; the lambda/4 budget is spent between loops
+# (framePeriodicity below), not by inflating idle here.
+idleTimes = [7, 7, 7]
+adcStartTime = 6                # ADC start time in us
+numAdcSamples = 160             # Number of ADC samples per chirp
+adcSamplingFrequency = 4850     # ADC sampling frequency in ksps (matches AWR1843 reference SAMPLE_RATE)
+rampEndTime = 40                # Chirp ramp end time in us (mimo.c PATCHED value)
+rxGain = 48                     # dB
+txStartTime = 0                 # TX starttime in us
+hpfCornerFreq1 = 0              # 0: 175kHz
+hpfCornerFreq2 = 0              # 0: 350kHz
+pfVcoSelect = 0x02              # AWR2243: 0x02 = VCO2 (77-81 GHz) - matches mmwcas/mimo.c pfVcoSelect
+pfCalLutUpdate = 0x00
+txOutPowerBackoffCode = 0x00
+txPhaseShifter = 0x00
+
+[mimo.frame]
+numLoops = 1                     # loop == frame == one SAR aperture sample - see derivation above (was 255)
+numFrames = 0                   # Overridden by mimo.py --frames (0 in TOML = unused)
+framePeriodicity = 9             # ms - loop-to-loop/frame-to-frame gap, close to lambda/4 @ 0.1 m/s (was 65)
+chirpStartIdx = 0
+chirpEndIdx = 4                 # 5 chirps (0-4)
+frameTriggerDelay = 0.0
+triggerSelectMaster = 1         # software trigger
+triggerSelectSlave = 2          # hardware sync from master
+
+[mimo.channel]
+# Per-device RX mask [Dev1, Dev2, Dev3, Dev4]. All 4 devices enabled with all
+# 4 RX each -> 16 physical RX.
+rxChannelEn = [0x0F, 0x0F, 0x0F, 0x0F]
+txChannelEn = 0x07              # Enable all 3 TX channels
+
+# Chirp geometry: per-device local TX antenna index per chirp (-1 = TX off).
+# Chirp:  0  1  2  3  4  5
+# Dev1:  -- -- -- -- -- --
+# Dev2:  T0 T1 T2 -- -- --
+# Dev3:  -- -- -- -- -- --
+# Dev4:  -- -- -- T0 T1 T2
+[mimo.chirp]
+numChirps = 5
+profileIdPerChirp = [0, 2, 1, 0, 2]
+txAntennaTable = [
+    [-1, -1, -1, -1, -1],        # Dev1 master: RX only
+    [0, 2, -1, -1, -1],          # Dev2 slave1: TX0/TX2 on chirp0/1 (TX4/6)
+    [-1, -1, 1, -1, -1],         # Dev3 slave2: TX1 (middle / TX8) on chirp2
+    [-1, -1, -1, 0, 2],          # Dev4 slave3: TX0/TX2 on chirp3/4 (TX10/12)
+]
+startFreqVar_MHz = 0.0
+freqSlopeVar_KHz_usec = 0.0
+idleTimeVar_usec = 0.0
+adcStartTimeVar_usec = 0.0
+
+[mimo.rfInit]
+# Documentation-only: MMWL_rfInit() (the SDK wrapper mmw_set_config() calls)
+# takes no calibEnMask parameter, so this value is written to the
+# .mmwave.json sidecar but not actually applied to the chip.
+calibEnMask = 0x1FF0             # matches MMWL_rfInit / Studio boot cals
+
+[mimo.adcOut]
+adcBits = 2                      # 16-bit
+fullScaleReducFctr = 0
+adcOutFmt = 1                    # complex
+
+[mimo.lowPower]
+lpAdcMode = 0
+
+[mimo.misc]
+miscCtl = 1                      # per-chirp phase shifter enable
+
+[mimo.ldo]
+ldoBypassEnable = 3
+supplyMonIrDrop = 0
+ioSupplyIndicator = 0
+
+[mimo.datapath]
+iqSwapSel = 0
+chInterleave = 0
+intfSel = 0                      # CSI2
+transferFmtPkt0 = 1
+transferFmtPkt1 = 0
+cqConfig = 0
+cq0TransSize = 0
+cq1TransSize = 0
+cq2TransSize = 0                 # documentation-only: rlDevDataPathCfg_t has
+                                  # no cq2TransSize field, not applied to the chip
+laneClkCfg = 1                   # 0=SDR, 1=DDR
+dataRate_Mbps = 600              # mapped to dataRate/hsiClk SDK codes at runtime;
+                                  # valid DDR rates: 600/450/400/300/225/150
+lanePosPolSel = 0x35421
+lineStartEndDis = 0

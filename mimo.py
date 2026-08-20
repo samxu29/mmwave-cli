@@ -28,6 +28,17 @@ ROOT CAUSE OF (B) - radar RF/geometry preset (2026-07-27 A/B):
     ZERO internal gaps - only mechanism (A) tail shortfall.
   * Same CLI path + cascade_tx6_rx16_3rps (and Studio with the matching
     Capture_cascade_tx6 Lua): mid-capture gaps on both hosts.
+  * cascade_tx6_rx16_1rps (100 ms period, 2026-08-11, 100-frame run): 97/100,
+    slot map showed 2 ADJACENT internal misses (slots 36+37, hence the single
+    reported gap of 2.25x median - two skips back to back look like one big
+    gap, not two separate ~2x ones) + 1 separate tail miss (slot 99) - so
+    both mechanisms (A tail + B internal) on the SAME run, same tx6_rx16
+    family as the _3rps preset above but at 1/3 the frame rate, confirming
+    mechanism B isn't specific to the 3rps timing. measured rate 9.999 Hz vs
+    10.000 Hz requested (p10..p90 spread 0.05%) - so the shortfall here is
+    pure frame drop, NOT any rate-lock/throttle (see analyse_intervals()'s
+    RATE-LOCK note in check_timestamp.py) - confirms mechanism B is a
+    discrete skip event, not a stretched clock.
 So mechanism (B) tracks the radar schedule / geometry / data-rate of the
 selected --radar-config, not mmwcas arm/stop on the Pi. Prefer a known-good
 preset (cascade_baseline) or relax chirps / loops / period / RX count when
@@ -39,6 +50,30 @@ Earlier wrong leads (kept for history, do not re-chase as the primary cause):
   * Page cache / dirty_expire, SSD saturation %, raw write-rate MB/s alone,
     TDA numberOfFramesToCapture headroom, RfInitCalibConfig divergence -
     ruled out or not explanatory (see git history / tda_probe.py notes).
+
+NOT the same mechanism as a DCA1000/GbE rig's "packet delay" throttling
+(2026-08-11 - checked after seeing that failure mode analysed on different
+hardware). That DCA1000 case is a host-facing Ethernet UDP link whose
+packet-delay setting caps the achievable MB/s below what the chirp/RX
+config needs, so the RDIF backpressure sensor stretches every frame period
+out to match - frame count still complete, near-zero jitter (p10~=p90),
+but the measured rate sits materially below the requested rate. THIS
+repo's TIDEP-01012 cascade path has no equivalent knob: mmwcas'
+rlTdaArmCfg_t (see mmwcas.pyx) carries framePeriodicity /
+numberOfFilesToAllocate / dataPacking / numberOfFramesToCapture only - no
+packetDelay field - because ADC data goes chip -> LVDS -> TDA -> onboard
+SSD directly, never a host-facing Ethernet capture-card stream. The
+mechanism-B A/B above also already controlled for a pure-throughput
+explanation (two presets 2x apart in write rate/duty both landed at
+292/300), which is evidence against an analogous rate ceiling here.
+Still, since a stretched-but-complete run would look like ordinary
+mid-capture drops once the host's NOMINAL-period wait (see
+_wait_s_for_frames() below) cuts the capture short before the
+stretched-rate frame count catches up, analyse_intervals() (check_
+timestamp.py, run automatically on every capture's RF frame timestamps
+below) now has an explicit RATE-LOCKED check for this exact signature -
+see that function's docstring - as a safety net for any future preset or
+capture path where it might actually apply.
 
 WHAT HELPED, MODESTLY: arming with numberOfFilesToAllocate > 0 so the TDA is not
 extending the capture file while frames stream in. Pooled means over identical
@@ -151,7 +186,9 @@ def _wait_s_for_frames(num_frames, period_s):
     it generous anyway so de-arm never cuts off a still-running radar; the
     radar auto-stops at numFrames so waiting extra is harmless (stop_frame()
     then just reports frame-already-ended)."""
-    return num_frames * period_s + period_s + 5.0
+    # return num_frames * period_s + period_s + 5.0
+    return num_frames * period_s + period_s
+
 
 
 def _rx_popcount_per_device(cfg):

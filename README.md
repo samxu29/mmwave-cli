@@ -64,7 +64,7 @@ This is the recommended path for raw IF capture on Linux / Raspberry Pi.
 ### Dependencies
 
 ```bash
-pip install cython numpy pyserial
+pip install setuptools cython numpy pyserial
 pip install tomli   # only needed on Python < 3.11 (stdlib tomllib on 3.11+)
 ```
 
