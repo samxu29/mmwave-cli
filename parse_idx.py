@@ -67,6 +67,7 @@ size / same numIdx does NOT prove content is aligned - if those timestamps
 stay locked while data.bin looks skewed, idx cannot name the guilty device.
 """
 import argparse
+import glob
 import json
 import struct
 import subprocess
@@ -671,7 +672,17 @@ def main():
     if args.fetch:
         paths = _scp_fetch(args.fetch, args.tda_ip, args.dest) + paths
     if not paths:
-        ap.error("no idx files (pass paths or use --fetch)")
+        # No paths given and no --fetch: default to whatever *_idx.bin
+        # already sits in --dest (rf_bins/ by default) from a prior --fetch.
+        paths = sorted(glob.glob(os.path.join(args.dest, "*_idx.bin")))
+        if paths:
+            print(f"No idx files given - defaulting to {len(paths)} file(s) "
+                  f"already in {args.dest}/:")
+            for p in paths:
+                print(f"  {p}")
+    if not paths:
+        ap.error(f"no idx files (pass paths, use --fetch, or put *_idx.bin "
+                 f"in {args.dest}/)")
 
     results = []
     for p in paths:

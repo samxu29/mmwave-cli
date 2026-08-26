@@ -1,0 +1,31 @@
+tx6rx16_1rps:
+framePeriodicity = 65
+frameCount = 300
+first frame ts     : 115661.204 ms  (raw 115661204 us, TDA clock)
+last frame ts      : 135000.670 ms  (raw 135000670 us, TDA clock)
+capture span       : 19.339 s (19339 ms across 288 frames)
+expected span      : 19.435 s (300 frames requested x 65 ms nominal) -> measured is -96 ms (1.47 periods short)
+
+tx5rx16_5rps:
+framePeriodicity = 100
+frameCount = 300
+first frame ts     : 131526.893 ms  (raw 131526893 us, TDA clock)
+last frame ts      : 161255.001 ms  (raw 161255001 us, TDA clock)
+capture span       : 29.728 s (29728 ms across 276 frames)
+expected span      : 29.900 s (300 frames requested x 100 ms nominal) -> measured is -172 ms (1.72 periods short)
+
+tx6rx16_3rps:
+framePeriodicity = 76
+frameCount = 300
+first frame ts     : 279637.016 ms  (raw 279637016 us, TDA clock)
+last frame ts      : 302249.381 ms  (raw 302249381 us, TDA clock)
+capture span       : 22.612 s (22612 ms across 238 frames)
+expected span      : 22.724 s (300 frames requested x 76 ms nominal) -> measured is -112 ms (1.47 periods short)
+
+tx7rx16_1rps:
+framePeriodicity = 115
+frameCount = 300
+first frame ts     : 1278962.925 ms  (raw 1278962925 us, TDA clock)
+last frame ts      : 1313150.360 ms  (raw 1313150360 us, TDA clock)
+capture span       : 34.187 s (34187 ms across 289 frames)
+expected span      : 34.385 s (300 frames requested x 115 ms nominal) -> measured is -198 ms (1.72 periods short)

@@ -35,3 +35,4 @@ dashboard/telegraf/.env
 *timestamps.npy
 *map.json
 *.logs
+.claude/settings.local.json
