@@ -15,6 +15,7 @@ mmwave
 /build
 .DS_Store
 /ir_timestamps/*
+/robot_trajectories/
 /rf_bins/
 /rf_frame_timestamps/
 /rpi_frame_timestamps/

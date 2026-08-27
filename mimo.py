@@ -596,7 +596,8 @@ def save_ir_timestamps(capture_dir):
 
 
 def run_one_capture(exp_name, num_frames, tda_ip, prealloc_files=None,
-                    reclaim_padding=True):
+                    reclaim_padding=True, on_frame_start=None, enable_ir=True,
+                    wait_fn=None):
     """
     Arm the TDA, record one capture, de-arm, then verify + export the
     .mmwave.json sidecar. Same division of responsibility as mimo.c's
@@ -641,6 +642,23 @@ def run_one_capture(exp_name, num_frames, tda_ip, prealloc_files=None,
     process restarted. Not worth the reliability cost - see git history for
     the mmwcas.mmw_reconfigure_frame_count() function kept for reference.
 
+    on_frame_start, if given, is called once after mmw_start_frame()
+    returns success and before the host wait begins, with the capture_dir
+    name as its only argument. Used by mimo_robotic.py to kick the arm
+    (and name the trajectory .npy) the moment framing is live. It MUST
+    return quickly (spawn a subprocess, do not join): a blocking callback
+    delays mmw_stop_frame() and stretches the capture past num_frames.
+
+    wait_fn, if given, replaces the default host sleep of
+    num_frames × framePeriodicity. mimo_robotic.py uses this to stop the
+    radar when the arm motion process exits. A wait_fn that blocks forever
+    will never reach mmw_stop_frame().
+
+    enable_ir: when False, skip GPIO recording / *_ir_timestamps.npy /
+    IR upload entirely (mimo_robotic.py). Default True preserves mimo.py
+    and mimo_interactive.py, which still gate on the ir_enabled global
+    set by setup_ir_sensor().
+
     Returns (status, capture_dir) - status is 0 on full success.
     """
     global config_dict
@@ -656,8 +674,12 @@ def run_one_capture(exp_name, num_frames, tda_ip, prealloc_files=None,
     # time and does not change per-prompt.
     config_dict["mimo"]["frame"]["numFrames"] = num_frames
 
-    print(f"\n>>> Capturing '{capture_dir}' — {num_frames} frames "
-          f"(~{approx_s:.1f}s @ {period_s*1000:.0f} ms/frame) ...")
+    if wait_fn is None:
+        print(f"\n>>> Capturing '{capture_dir}' — {num_frames} frames "
+              f"(~{approx_s:.1f}s @ {period_s*1000:.0f} ms/frame) ...")
+    else:
+        print(f"\n>>> Capturing '{capture_dir}' — until motion ends "
+              f"({period_s*1000:.0f} ms/frame) ...")
 
     sync_tda_clock(tda_ip)
 
@@ -684,9 +706,10 @@ def run_one_capture(exp_name, num_frames, tda_ip, prealloc_files=None,
     # IR recording is only ever "on" for the TDA framing window below - armed
     # right before mmw_start_frame(), disarmed when the frame wait ends (before
     # mmw_stop_frame()/de-arm/transfer, which are unrelated to framing and
-    # shouldn't pick up stray edges).
+    # shouldn't pick up stray edges). mimo_robotic.py passes enable_ir=False.
     global ir_recording
-    if ir_enabled:
+    record_ir = bool(enable_ir and ir_enabled)
+    if record_ir:
         ir_recording = True
 
     status = mmwcas.mmw_start_frame()
@@ -700,10 +723,28 @@ def run_one_capture(exp_name, num_frames, tda_ip, prealloc_files=None,
     # per-frame array from the RF side's per-frame spacing.
     host_start_time = time.time()
 
-    print(f"\n Capturing... ({num_frames} frames, waiting {wait_s:.2f}s)")
-    time.sleep(wait_s)
+    if on_frame_start is not None:
+        try:
+            on_frame_start(capture_dir)
+        except TypeError:
+            on_frame_start()
+        except Exception as e:
+            # Framing is already live - do not let a hook error skip
+            # mmw_stop_frame() / de-arm below.
+            print(f"[on_frame_start] failed ({e!r}); capture continues.")
+
+    print(f"\n Capturing... ({num_frames} frames, waiting {wait_s:.2f}s)"
+          if wait_fn is None else
+          f"\n Capturing... (until motion ends; --frames={num_frames} is TDA prealloc only)")
+    if wait_fn is not None:
+        try:
+            wait_fn()
+        except Exception as e:
+            print(f"[wait_fn] failed ({e!r}); stopping capture.")
+    else:
+        time.sleep(wait_s)
     ir_recording = False
-    ir_npy_path = save_ir_timestamps(capture_dir)
+    ir_npy_path = save_ir_timestamps(capture_dir) if record_ir else None
 
     status = mmwcas.mmw_stop_frame()
     if status != 0:
@@ -728,9 +769,10 @@ def run_one_capture(exp_name, num_frames, tda_ip, prealloc_files=None,
         return status, capture_dir
 
     # Compare on-disk frame count vs. requested and warn on dropped frames
-    # (TDA/SSD couldn't keep up). Does not fail the capture - the data is
-    # still usable, just shorter than asked for.
-    _warn_on_frame_drops(files, num_frames, config_dict)
+    # (TDA/SSD couldn't keep up). Skip the requested-N check when wait_fn
+    # drove the length (motion-ended capture) - num_frames is only prealloc.
+    if wait_fn is None:
+        _warn_on_frame_drops(files, num_frames, config_dict)
 
     # Per-frame timestamps straight from the TDA's own idx.bin (one entry
     # per frame ACTUALLY captured, so it naturally reflects any drops,
@@ -766,15 +808,18 @@ def run_one_capture(exp_name, num_frames, tda_ip, prealloc_files=None,
                                  capture_dir, tda_ip)
 
     # Generate configuration JSON file only if capture was successful
+    if wait_fn is not None and rf_frame_ts is not None:
+        config_dict["mimo"]["frame"]["numFrames"] = int(len(rf_frame_ts))
     json_filename = os.path.join("mmwave_json_files", f"{capture_dir}.mmwave.json")
     print(f"\nGenerating configuration file: {json_filename}")
     export_config_to_json(config_dict, json_filename)
 
-    # Push the IR timestamps + both frame timestamp sidecars + config
-    # sidecar up into the same TDA capture directory as the raw .bin data,
-    # so they travel together through whatever downstream transfer step
-    # (e.g. fetch_to_usb.sh) pulls the capture off the TDA, instead of
-    # needing separate correlation after the fact.
+    # Push the frame timestamp sidecars + config sidecar (and IR timestamps
+    # when this capture recorded them) up into the same TDA capture
+    # directory as the raw .bin data, so they travel together through
+    # whatever downstream transfer step (e.g. fetch_to_usb.sh) pulls the
+    # capture off the TDA, instead of needing separate correlation after
+    # the fact.
     upload_files_to_tda([ir_npy_path, rf_frame_ts_path, rpi_frame_ts_path, json_filename],
                         capture_dir, tda_ip)
 
