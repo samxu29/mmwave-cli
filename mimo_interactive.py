@@ -37,6 +37,13 @@ import signal
 import argparse
 from datetime import datetime
 
+# Scripts do not auto-import GNU readline; without it, input() treats arrow
+# keys as escape sequences instead of moving the cursor / recalling history.
+try:
+    import readline  # noqa: F401
+except ImportError:
+    pass
+
 import mimo
 import mmwcas
 from utility import signal_handler, TeeLogger
