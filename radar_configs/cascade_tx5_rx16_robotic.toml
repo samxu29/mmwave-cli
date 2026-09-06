@@ -100,16 +100,16 @@
 
 [mimo.profile]
 id = 0
-startFrequency = 77             # Chirp start frequency in GHz
-frequencySlope = 95             # Frequency slope in MHz/us (mimo.c PATCHED value)
+startFrequency = 76 #77             # Chirp start frequency in GHz
+frequencySlope = 100 #95             # Frequency slope in MHz/us (mimo.c PATCHED value)
 # Per-profile idle times (us) - profile0/1/2 for chirp0/1/2
 # Baseline tight values (unchanged from cascade_tx5_rx16_5rps.toml) - see
 # FRAME/LOOP TIMING DERIVATION above: all 5 TX fire as one tight ~235us
 # burst per loop; the lambda/4 budget is spent between loops
 # (framePeriodicity below), not by inflating idle here.
 idleTimes = [7, 7, 7]
-adcStartTime = 6                # ADC start time in us
-numAdcSamples = 160             # Number of ADC samples per chirp
+adcStartTime = 4 #6                # ADC start time in us
+numAdcSamples = 175 #160             # Number of ADC samples per chirp
 adcSamplingFrequency = 4850     # ADC sampling frequency in ksps (matches AWR1843 reference SAMPLE_RATE)
 rampEndTime = 40                # Chirp ramp end time in us (mimo.c PATCHED value)
 rxGain = 48                     # dB
@@ -124,7 +124,7 @@ txPhaseShifter = 0x00
 [mimo.frame]
 numLoops = 1                     # loop == frame == one SAR aperture sample - see derivation above (was 255)
 numFrames = 0                   # Overridden by mimo.py --frames (0 in TOML = unused)
-framePeriodicity = 9             # ms - loop-to-loop/frame-to-frame gap, close to lambda/4 @ 0.1 m/s (was 65)
+framePeriodicity = 62 #9             # ms - loop-to-loop/frame-to-frame gap, close to lambda/4 @ 0.1 m/s (was 65)
 chirpStartIdx = 0
 chirpEndIdx = 4                 # 5 chirps (0-4)
 frameTriggerDelay = 0.0
