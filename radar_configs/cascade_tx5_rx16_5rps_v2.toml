@@ -23,13 +23,12 @@
 [mimo.profile]
 id = 0
 startFrequency =  76            # Chirp start frequency in GHz
-frequencySlope =  100            # Frequency slope in MHz/us (mimo.c PATCHED value)
-# Per-profile idle times (us) - profile0/1/2 for chirp0/1/2
-idleTimes = [7, 7, 7]
-adcStartTime = 5                 # ADC start time in us
-numAdcSamples =  160             # Number of ADC samples per chirp
+frequencySlope =  100           # Frequency slope in MHz/us (mimo.c PATCHED value)
+idleTimes = [7, 7, 7]           # Per-profile idle times (us) - profile0/1/2 for chirp0/1/2
+adcStartTime = 5                # ADC start time in us
+numAdcSamples =  160            # Number of ADC samples per chirp
 adcSamplingFrequency = 4850     # ADC sampling frequency in ksps (matches AWR1843 reference SAMPLE_RATE)
-rampEndTime = 40                 # Chirp ramp end time in us (mimo.c PATCHED value)
+rampEndTime = 40                # Chirp ramp end time in us (mimo.c PATCHED value)
 rxGain = 48                     # dB
 txStartTime = 0                 # TX starttime in us
 hpfCornerFreq1 = 0              # 0: 175kHz
@@ -40,7 +39,7 @@ txOutPowerBackoffCode = 0x00
 txPhaseShifter = 0x00
 
 [mimo.frame]
-numLoops =  100                  # mimo.c PATCHED value (was 16)
+numLoops =  255                 # mimo.c PATCHED value (was 16)
 numFrames = 0                   # Overridden by mimo.py --frames (0 in TOML = unused)
 framePeriodicity = 62           # ms
 chirpStartIdx = 0

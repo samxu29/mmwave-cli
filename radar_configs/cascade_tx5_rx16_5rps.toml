@@ -24,8 +24,7 @@
 id = 0
 startFrequency = 77             # Chirp start frequency in GHz
 frequencySlope = 95             # Frequency slope in MHz/us (mimo.c PATCHED value)
-# Per-profile idle times (us) - profile0/1/2 for chirp0/1/2
-idleTimes = [7, 7, 7]
+idleTimes = [7, 7, 7]           # Per-profile idle times (us) - profile0/1/2 for chirp0/1/2
 adcStartTime = 6                # ADC start time in us
 numAdcSamples = 160             # Number of ADC samples per chirp
 adcSamplingFrequency = 4850     # ADC sampling frequency in ksps (matches AWR1843 reference SAMPLE_RATE)
