@@ -39,3 +39,4 @@ dashboard/telegraf/.env
 .claude/settings.local.json
 
 /ur-ws
+exp-name.md
