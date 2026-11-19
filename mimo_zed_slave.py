@@ -7,7 +7,10 @@ mimo.run_one_capture() per take), but built to be controlled by a program
 instead of a person:
 
   * Commands arrive on stdin, one per line:
-        capture <exp_name>   record one take (TDA dir <exp_name>_<YYMMDD>_<HHMMSS>)
+        capture <exp_name> [<YYMMDD_HHMMSS>]
+                             record one take into TDA dir <exp_name>_<YYMMDD_HHMMSS>;
+                             the host sends its take timestamp so the camera and TDA
+                             folders share one name (default: this Pi's local time)
         ping                 answer with a "pong" event
         exit                 tear down and exit (also: quit, or EOF on stdin)
   * Results go out as machine-readable events, one JSON object per line,
@@ -75,10 +78,11 @@ import mmwcas
 from utility import TeeLogger
 from radar_config import RADAR_CONFIGS, DEFAULT_RADAR_CONFIG, get_radar_config
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 EVENT_PREFIX = "@MZS "
 EXIT_NEEDS_RESTART = 3
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_STAMP_RE = re.compile(r"^\d{6}_\d{6}$")
 
 
 class Hangup(Exception):
@@ -178,7 +182,7 @@ def _stop_radar():
             print(f"[slave] {step.__name__} during cleanup raised {exc!r}")
 
 
-def run_take(exp_name, args, events):
+def run_take(exp_name, stamp, args, events):
     """Record one take. Returns True when this process must exit (radar needs a fresh init)."""
     radar = RadarCalls(mmwcas)
     checked = {"files": None}
@@ -206,7 +210,7 @@ def run_take(exp_name, args, events):
     mimo.check_captured_files = check_captured_files
     try:
         status, capture_dir = mimo.run_one_capture(
-            exp_name, args.frames, args.tda_ip, on_frame_start=on_frame_start)
+            exp_name, args.frames, args.tda_ip, on_frame_start=on_frame_start, timestamp=stamp)
     except Hangup:
         hangup, message = True, "host disconnected during the take"
     except Exception as exc:
@@ -287,9 +291,10 @@ def serve(args, events):
             return 0
         if command == "ping":
             events.send("pong")
-        elif command == "capture" and len(parts) == 2 and _NAME_RE.match(parts[1]):
+        elif (command == "capture" and len(parts) in (2, 3) and _NAME_RE.match(parts[1])
+              and (len(parts) == 2 or _STAMP_RE.match(parts[2]))):
             try:
-                needs_restart = run_take(parts[1], args, events)
+                needs_restart = run_take(parts[1], parts[2] if len(parts) == 3 else None, args, events)
             except Hangup:
                 _stop_radar()
                 return 0

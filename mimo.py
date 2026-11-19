@@ -597,7 +597,7 @@ def save_ir_timestamps(capture_dir):
 
 def run_one_capture(exp_name, num_frames, tda_ip, prealloc_files=None,
                     reclaim_padding=True, on_frame_start=None, enable_ir=True,
-                    wait_fn=None):
+                    wait_fn=None, timestamp=None):
     """
     Arm the TDA, record one capture, de-arm, then verify + export the
     .mmwave.json sidecar. Same division of responsibility as mimo.c's
@@ -659,10 +659,15 @@ def run_one_capture(exp_name, num_frames, tda_ip, prealloc_files=None,
     and mimo_interactive.py, which still gate on the ir_enabled global
     set by setup_ir_sensor().
 
+    timestamp: "YYMMDD_HHMMSS" for the TDA directory name (exp_name_timestamp).
+    Default: the local time on this Pi. mimo_zed_slave.py passes the
+    host take timestamp so the camera and TDA folders share one name.
+
     Returns (status, capture_dir) - status is 0 on full success.
     """
     global config_dict
-    timestamp = datetime.now().strftime("%y%m%d_%H%M%S")
+    if timestamp is None:
+        timestamp = datetime.now().strftime("%y%m%d_%H%M%S")
     capture_dir = f"{exp_name}_{timestamp}"
     period_s = _frame_period_s(config_dict)
     wait_s = _wait_s_for_frames(num_frames, period_s)
